@@ -130,6 +130,68 @@ async fn memory_db_has_full_schema_and_foreign_keys() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn memory_store_is_one_shared_database_under_concurrency() {
+    // Review W-5: pool pinned to one connection (sqlx's guidance for
+    // `sqlite::memory:` pools). Proof: under real concurrency every task
+    // must see the SAME database — a regression to per-connection private
+    // :memory: DBs would show "no such table" or empty reads here.
+    let store = std::sync::Arc::new(Store::connect_memory().await.expect("memory store"));
+    store
+        .ensure_vault(1, "main")
+        .await
+        .expect("vault row (FK target for page_registry)");
+    store
+        .upsert_page(1, "concepts/seed.md", "Seed", "concept", "[]", None, false)
+        .await
+        .expect("seed row");
+
+    // Contention probe: hold the pool's connection while a query runs.
+    // With a pinned single connection the query waits for the holder and
+    // sees the data; with a >1 pool over a private-cache :memory: URL a
+    // second connection would be an empty DB and fail.
+    let holder = store.pool().acquire().await.expect("acquire holder");
+    let s2 = std::sync::Arc::clone(&store);
+    let probe = tokio::spawn(async move { s2.list_pages(1).await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    drop(holder);
+    let rows = probe
+        .await
+        .expect("task")
+        .expect("list_pages must run on the shared connection, not a private empty DB");
+    assert_eq!(rows.len(), 1, "same connection sees the data");
+
+    // Concurrent writers all land in the one shared database.
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let store = std::sync::Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            store
+                .upsert_page(
+                    1,
+                    &format!("concepts/p{i}.md"),
+                    &format!("P{i}"),
+                    "concept",
+                    "[]",
+                    None,
+                    false,
+                )
+                .await
+                .expect("upsert (second private DB would lack the table)");
+            let rows = store.list_pages(1).await.expect("list");
+            assert!(
+                rows.iter().any(|r| r.path == format!("concepts/p{i}.md")),
+                "task {i} must see its own row in the shared DB"
+            );
+        }));
+    }
+    for h in handles {
+        h.await.expect("task");
+    }
+    // Final state: seed + 8 rows live in the ONE shared database.
+    assert_eq!(store.list_pages(1).await.unwrap().len(), 9);
+}
+
 #[tokio::test]
 async fn init_fs_creates_expected_tree_and_seeds() {
     let tmp = TempDir::new().expect("tempdir");

@@ -63,6 +63,13 @@ impl Store {
 
     /// In-memory store for tests (MoriNet store.rs:104-111 idiom). Same
     /// migrations; WAL omitted — `:memory:` databases cannot use it.
+    /// Review W-5: the pool is pinned to ONE connection — sqlx's documented
+    /// guidance for in-memory pools. (sqlx 0.8 parses `sqlite::memory:`
+    /// with shared cache, so extra connections already see one shared DB;
+    /// a >1 pool would only add shared-cache lock contention for no
+    /// benefit. One connection makes the single-database guarantee
+    /// explicit and version-proof — a private-cache regression upstream
+    /// would otherwise silently mint empty DBs.)
     pub async fn connect_memory() -> Result<Self> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")?
             .create_if_missing(true)
