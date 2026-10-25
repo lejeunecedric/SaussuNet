@@ -2,6 +2,52 @@
 //! `/home/c/.hermes/profiles/devo/skills/research/llm-wiki/SKILL.md`,
 //! "SCHEMA.md Template") plus the two SaussuNet writer rules (D-05/D-07).
 
+use crate::error::{CoreError, Result};
+
+use super::Vault;
+
+/// Parse the tag taxonomy from the vault's SCHEMA.md: bullet lines under
+/// `## Tag Taxonomy` shaped `- Category: tag1, tag2, ...` (the seeded
+/// format). Returns the flat list of allowed tags.
+pub fn parse_tag_taxonomy(vault: &Vault) -> Result<Vec<String>> {
+    let path = vault.root().join("SCHEMA.md");
+    let content = std::fs::read_to_string(&path).map_err(|e| CoreError::Io {
+        path: path.clone(),
+        source: e,
+    })?;
+    let mut tags = Vec::new();
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            in_section = trimmed == "## Tag Taxonomy";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(bullet) = trimmed.strip_prefix("- ") {
+            // `- People/Orgs: person, company, ...` — tags follow the colon.
+            if let Some((_, list)) = bullet.split_once(':') {
+                tags.extend(
+                    list.split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty()),
+                );
+            }
+        }
+    }
+    if tags.is_empty() {
+        // Loud failure (§2.8): a vault whose SCHEMA.md lost its taxonomy
+        // would silently accept any tag — refuse instead.
+        return Err(CoreError::Vault(format!(
+            "no tag taxonomy found under '## Tag Taxonomy' in {} — fix SCHEMA.md",
+            path.display()
+        )));
+    }
+    Ok(tags)
+}
+
 /// Build the SCHEMA.md seed for a vault whose Domain is `domain` (the vault
 /// name from config).
 pub fn seed(domain: &str) -> String {
@@ -112,7 +158,7 @@ When new information conflicts with existing content:
 
 #[cfg(test)]
 mod tests {
-    use super::seed;
+    use super::*;
 
     #[test]
     fn seed_contains_required_sections() {
@@ -125,5 +171,30 @@ mod tests {
         }
         assert!(s.contains("gen_hash"));
         assert!(s.contains("protected: true"));
+    }
+
+    #[tokio::test]
+    async fn parse_tag_taxonomy_reads_seeded_schema() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = Vault::new(1, "main", tmp.path().to_path_buf());
+        vault.init_fs().await.unwrap();
+        let tags = parse_tag_taxonomy(&vault).unwrap();
+        for t in ["person", "company", "technology", "process", "comparison"] {
+            assert!(tags.iter().any(|x| x == t), "missing {t} in {tags:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_tag_taxonomy_fails_loudly_when_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        super::super::atomic::write_atomic(
+            &tmp.path().join("SCHEMA.md"),
+            b"# Wiki Schema\n\nno taxonomy here\n",
+        )
+        .await
+        .unwrap();
+        let vault = Vault::new(1, "main", tmp.path().to_path_buf());
+        let err = parse_tag_taxonomy(&vault).unwrap_err().to_string();
+        assert!(err.contains("no tag taxonomy"), "{err}");
     }
 }
