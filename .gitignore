@@ -1,10 +1,27 @@
 # Rust
 /target/
 
-# Config serveur de déploiement — JAMAIS versionnée (gabarit : deploy.example.sh)
+# Déploiement — config serveur RÉELLE jamais versionnée
+# (seuls les gabarits *.example / deploy.example.sh sont commités)
 deploy.local.sh
-.env.deploy
+*.local.sh
+*.local.env
+*.local.cfg
 .deploy/
+.env
+.env.*
+!.env.example
+!.env.deploy.example
+
+# Secrets / credentials (jamais dans le repo, a fortiori public)
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+nginx.local.conf
 
 # Vault de démo local / données runtime
 /vaults/
