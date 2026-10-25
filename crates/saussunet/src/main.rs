@@ -40,6 +40,8 @@ enum Command {
     InitVault,
     /// Write a wiki page through the sole vault writer (validation + atomic +
     /// index/log updates). `--from` is the source markdown file.
+    /// Exit codes: 0 written · 1 validation error · 2 conflict or refusal
+    /// (recorded in pending_proposals, awaiting review).
     WritePage {
         /// Vault-relative page path, e.g. concepts/foo.md.
         #[arg(long)]
@@ -47,6 +49,13 @@ enum Command {
         /// Local markdown file with the page content (frontmatter included).
         #[arg(long)]
         from: PathBuf,
+    },
+    /// List pending conflicts (skipped/refused writes awaiting review, D-06).
+    /// Exit 0 in both cases — an empty list is not an error state.
+    Conflicts {
+        /// Print the full JSON array including proposed_content.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -82,6 +91,12 @@ fn main() -> anyhow::Result<()> {
                 .build()?
                 .block_on(write_page_cmd(&path, &from))?;
         }
+        Some(Command::Conflicts { json }) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(conflicts_cmd(json))?;
+        }
     }
 
     Ok(())
@@ -105,8 +120,9 @@ async fn boot() -> anyhow::Result<()> {
 }
 
 /// `write-page` command: same boot wiring (config → store → vault), then
-/// the sole writer. Validation rejections (frontmatter/vault path errors)
-/// print the cause to stderr and exit 1; other errors propagate to anyhow.
+/// the sole writer. Exit codes: 0 written · 1 validation rejection
+/// (frontmatter/vault path errors, cause on stderr) · 2 conflict or refusal
+/// (write skipped/recorded in pending_proposals, awaiting review).
 async fn write_page_cmd(rel_path: &str, from: &std::path::Path) -> anyhow::Result<()> {
     let config_path = std::path::Path::new("config.toml");
     let cfg = load_config_or_default(config_path)?;
@@ -118,9 +134,17 @@ async fn write_page_cmd(rel_path: &str, from: &std::path::Path) -> anyhow::Resul
         std::fs::read_to_string(from).with_context(|| format!("cannot read {}", from.display()))?;
     let (store, vault) = saussunet_core::boot_open(&rt).await?;
     match saussunet_core::vault::writer::write_page(&vault, &store, rel_path, &content).await {
-        Ok(_) => {
+        Ok(saussunet_core::vault::writer::WriteOutcome::Written { .. }) => {
             println!("wrote {rel_path}");
             Ok(())
+        }
+        Ok(saussunet_core::vault::writer::WriteOutcome::ConflictRecorded { reason, .. }) => {
+            println!("conflict recorded: {rel_path} ({reason})");
+            std::process::exit(2);
+        }
+        Ok(saussunet_core::vault::writer::WriteOutcome::Refused { reason }) => {
+            println!("refused: {rel_path} ({reason})");
+            std::process::exit(2);
         }
         Err(e @ (CoreError::Frontmatter(_) | CoreError::Vault(_))) => {
             eprintln!("error: {e}");
@@ -128,4 +152,37 @@ async fn write_page_cmd(rel_path: &str, from: &std::path::Path) -> anyhow::Resul
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// `conflicts` command: list pending_proposals rows for the configured
+/// vault. Human-readable lines `<id>  <reason>  <path>  <created_at>`
+/// (content never dumped), or the full JSON array with `--json`.
+/// Exit 0 always — an empty list is not an error state.
+async fn conflicts_cmd(json: bool) -> anyhow::Result<()> {
+    let config_path = std::path::Path::new("config.toml");
+    let cfg = load_config_or_default(config_path)?;
+    let rt = cfg.resolve();
+    if config_path.exists() {
+        saussunet_core::assert_outside_vault(config_path, &rt.vault_root)?;
+    }
+    let (store, vault) = saussunet_core::boot_open(&rt).await?;
+    if json {
+        let rows = store.list_pending_proposals(vault.id).await?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).context("cannot serialize proposals")?
+        );
+    } else {
+        let rows = store.list_pending_summary(vault.id).await?;
+        if rows.is_empty() {
+            println!("no pending conflicts");
+        }
+        for r in rows {
+            println!(
+                "{}  {}  {}  {}",
+                r.id, r.reason, r.target_path, r.created_at
+            );
+        }
+    }
+    Ok(())
 }

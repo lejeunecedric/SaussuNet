@@ -14,4 +14,5 @@ saussunet-core = { path = "../saussunet-core" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }

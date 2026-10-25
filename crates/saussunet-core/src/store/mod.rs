@@ -11,6 +11,7 @@ mod proposals;
 mod sync_state;
 mod vaults;
 
+pub use proposals::{Proposal, ProposalSummary};
 pub use vaults::VaultRow;
 
 use std::path::Path;
