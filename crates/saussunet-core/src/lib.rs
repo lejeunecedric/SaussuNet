@@ -11,6 +11,106 @@ pub mod error;
 pub mod store;
 pub mod vault;
 
+use std::path::{Path, PathBuf};
+
+use crate::config::RuntimeConfig;
+use crate::error::{CoreError, Result};
+use crate::vault::Vault;
+
+pub use crate::store::Store;
+
+/// Shared boot path (ROADMAP SC1): the bare run and `init-vault` both call
+/// this, and `tests/init_vault.rs` drives the exact production sequence.
+/// Order per PATTERNS §2.7: safety check → Store::connect (WAL + migrations) →
+/// ensure_vault → Vault::init_fs. Returns the canonical vault root.
+pub async fn boot(cfg: &RuntimeConfig) -> Result<PathBuf> {
+    // Threat T-01-01: the DB must never live inside the vault — a vault is
+    // served/previewed later (mdbook, MCP) and everything inside it leaks.
+    assert_outside_vault(&cfg.db_path, &cfg.vault_root)?;
+
+    let store = Store::connect(&cfg.db_path).await?;
+    let row = store.ensure_vault(cfg.vault_id, &cfg.vault_name).await?;
+    if row.id != cfg.vault_id {
+        // ensure_vault pins the id; a mismatch means row/path drift (D-04) —
+        // fail boot loudly rather than operate on the wrong directory.
+        return Err(CoreError::Vault(format!(
+            "vault row id {} != configured vault id {} — refusing to start (D-04)",
+            row.id, cfg.vault_id
+        )));
+    }
+    // vault_root is always data/vaults/<db row id> (D-04): RuntimeConfig keys
+    // it by the configured id and the check above proves they are equal.
+    let vault = Vault::new(row.id, row.name.clone(), cfg.vault_root.clone());
+    vault.init_fs().await?;
+    let root = vault.root.canonicalize().map_err(|e| CoreError::Io {
+        path: vault.root.clone(),
+        source: e,
+    })?;
+    Ok(root)
+}
+
+/// Fail with an actionable error if `path` resolves inside `vault_root`
+/// (threat T-01-01). Used for `db_path` in [`boot`] and for the config file
+/// path in the binary.
+pub fn assert_outside_vault(path: &Path, vault_root: &Path) -> Result<()> {
+    let p = absolutize(path);
+    let v = absolutize(vault_root);
+    if p.starts_with(&v) {
+        return Err(CoreError::Vault(format!(
+            "refusing to start: {} resolves inside vault root {} — a vault is served/previewed \
+             later and everything inside it leaks; move [storage].data_dir (and config) \
+             outside the vault directory (T-01-01)",
+            path.display(),
+            vault_root.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Best-effort absolute, symlink-resolved form of `path` for containment
+/// checks: canonicalize when possible; otherwise canonicalize the nearest
+/// existing ancestor and re-append the missing tail.
+fn absolutize(path: &Path) -> PathBuf {
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = abs.clone();
+    loop {
+        if let Ok(real) = cur.canonicalize() {
+            let mut out = real;
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            return out;
+        }
+        let parent = cur.parent().map(Path::to_path_buf);
+        match (cur.file_name(), parent) {
+            (Some(name), Some(parent)) => {
+                tail.push(name.to_os_string());
+                cur = parent;
+            }
+            _ => return abs,
+        }
+    }
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::assert_outside_vault;
+
+    #[test]
+    fn db_inside_vault_is_rejected() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let vault_root = tmp.path().join("vaults/1");
+        std::fs::create_dir_all(&vault_root).unwrap();
+        let db_inside = vault_root.join("saussunet.db");
+        let err = assert_outside_vault(&db_inside, &vault_root)
+            .expect_err("db inside vault root must fail (T-01-01)");
+        assert!(err.to_string().contains("T-01-01"));
+        // The normal layout passes.
+        assert_outside_vault(&tmp.path().join("saussunet.db"), &vault_root).unwrap();
+    }
+}
+
 /// Crate version, surfaced by `saussunet version`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

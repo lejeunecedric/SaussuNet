@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 
-use saussunet_core::config::{load_config_or_default, FileConfig};
+use saussunet_core::config::load_config_or_default;
 
 #[derive(Parser)]
 #[command(
@@ -70,17 +70,19 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Task 1 stub: resolve config (defaults when the file is absent) and report
-/// the vault root. Task 2 replaces the body with the real boot wiring
-/// (Store::connect → ensure_vault → Vault::init_fs).
+/// Boot wiring (PATTERNS §2.7): load config (defaults when the file is
+/// absent) → T-01-01 config-placement check → `saussunet_core::boot`
+/// (Store::connect → ensure_vault → Vault::init_fs) → `vault ready: <path>`.
 async fn boot() -> anyhow::Result<()> {
-    let cfg: FileConfig = load_config_or_default(std::path::Path::new("config.toml"))?;
+    let config_path = std::path::Path::new("config.toml");
+    let cfg = load_config_or_default(config_path)?;
     let rt = cfg.resolve();
-    let root = if rt.vault_root.exists() {
-        rt.vault_root.canonicalize()?
-    } else {
-        rt.vault_root
-    };
+    // Threat T-01-01: a config file living inside the vault would leak when
+    // the vault is served/previewed later.
+    if config_path.exists() {
+        saussunet_core::assert_outside_vault(config_path, &rt.vault_root)?;
+    }
+    let root = saussunet_core::boot(&rt).await?;
     println!("vault ready: {}", root.display());
     Ok(())
 }
