@@ -103,12 +103,36 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (populated by roadmap) | — | Pending |
+| VLET-01 | Phase 1 | Pending |
+| VLET-02 | Phase 1 | Pending |
+| VLET-03 | Phase 1 | Pending |
+| VLET-04 | Phase 1 | Pending |
+| INFR-01 | Phase 1 | Pending |
+| INFR-02 | Phase 1 | Pending |
+| LLMP-01 | Phase 2 | Pending |
+| LLMP-02 | Phase 2 | Pending |
+| SRCC-03 | Phase 2 | Pending |
+| PIPE-01 | Phase 3 | Pending |
+| PIPE-02 | Phase 3 | Pending |
+| PIPE-03 | Phase 3 | Pending |
+| PIPE-04 | Phase 3 | Pending |
+| PIPE-05 | Phase 3 | Pending |
+| PIPE-06 | Phase 3 | Pending |
+| SRCC-01 | Phase 4 | Pending |
+| SRCC-02 | Phase 4 | Pending |
+| LINT-01 | Phase 5 | Pending |
+| LINT-02 | Phase 5 | Pending |
+| REVI-01 | Phase 5 | Pending |
+| REVI-02 | Phase 5 | Pending |
+| REVI-03 | Phase 5 | Pending |
+| MCPX-01 | Phase 6 | Pending |
+| PREV-01 | Phase 6 | Pending |
+| INFR-03 | Phase 6 | Pending |
 
 **Coverage:**
-- v1 requirements: 21 total
-- Mapped to phases: 0
-- Unmapped: 21 ⚠️
+- v1 requirements: 25 total (corrected count — the v1 section lists 25 REQ-IDs, not 21)
+- Mapped to phases: 25
+- Unmapped: 0 ✅
 
 ---
 *Requirements defined: 2026-10-25*
