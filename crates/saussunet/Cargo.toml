@@ -1,0 +1,17 @@
+[package]
+name = "saussunet"
+description = "SaussuNet binary: self-hosted llm-wiki vault server (Phase 1: CLI only, no HTTP)."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "saussunet"
+path = "src/main.rs"
+
+[dependencies]
+saussunet-core = { path = "../saussunet-core" }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing-subscriber = { workspace = true }

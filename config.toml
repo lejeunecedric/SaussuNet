@@ -1,0 +1,15 @@
+# SaussuNet configuration (template written by `saussunet init`).
+
+[server]
+# Phase 1 opens no listener; the default is pinned to localhost (INFR-02, T-01-02).
+bind = "127.0.0.1:8080"
+
+[storage]
+# Data root: holds saussunet.db and vaults/<id>/. Must never live inside a
+# vault directory (threat T-01-01 — a vault is served/previewed later).
+data_dir = "./data"
+
+[vault]
+# The single v1 vault (D-04): filesystem path is <data_dir>/vaults/<id>/.
+id = 1
+name = "main"

@@ -1,0 +1,41 @@
+[workspace]
+members = ["crates/saussunet-core", "crates/saussunet"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+# Single-sourced dependency versions for the whole workspace (INFR-01,
+# PATTERNS §3). saussunet-core must never add axum/HTTP deps (Anti-Pattern 1;
+# guarded by scripts/check.sh).
+[workspace.dependencies]
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "fs"] }
+# Pinned 0.8, NOT STACK's 0.9: MoriNet's Cargo.lock pins sqlx 0.8.6 and two
+# sqlx majors cannot coexist in one binary; QUAL-05 (saussunet-core embedded in
+# MoriNet) is the binding future constraint. See SKELETON.md "Architectural
+# Decisions" — a later 0.8→0.9 bump is a mechanical migration we control.
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yml = "0.0.13"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+sha2 = "0.11"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+pulldown-cmark = "0.13"
+# NOTE: the `tracing` crate's latest line is 0.1.x (STACK's "0.3.23" refers to
+# tracing-subscriber, which IS 0.3).
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

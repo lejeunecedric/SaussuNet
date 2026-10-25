@@ -9,6 +9,13 @@ deploy.local.sh
 # Vault de démo local / données runtime
 /vaults/
 *.local.toml
+config.local.toml
+
+# Runtime data (SQLite DB + vaults) — never committed (T-01-04)
+/data/
+
+# Atomic-write temp files (vault/atomic.rs pattern: .<name>.tmp-<uuid>)
+*.tmp-*
 
 # Divers
 .DS_Store
