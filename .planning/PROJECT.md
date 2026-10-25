@@ -72,6 +72,7 @@ Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-d
 | Rust workspace: `saussunet-core` + standalone binary; MoriNet can depend on the lib | Dual standalone/embedded mode without code duplication or tight coupling | — Pending |
 | Spelling corrected: SaussuNet / `saussunet` (not SaussuNoet) | User decision 2026-10-25 | ✓ Locked |
 | Deploy to our server with gitignored server config (example template only in repo) | Hosts/paths/credentials must never be versioned; reuse MoriNet pattern without exposing holldemo | — Pending |
+| Serve at `https://morinet.treklair.fr/saussunet` — nginx path prefix on the same host as MoriNet (holldemo) | User decision 2026-10-25. Phase 5 UI + Phase 6 deploy MUST honor a configurable base path (`/saussunet`): axum `nest()` scope, asset URLs prefixed, nginx `location /saussunet/` proxy beside MoriNet's block; nothing to proxy before Phase 5 (Phase 1 is headless CLI) | — Pending |
 | All project artifacts written in English | User decision 2026-10-25 | ✓ Locked |
 
 ## Evolution
