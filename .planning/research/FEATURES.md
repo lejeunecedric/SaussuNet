@@ -41,7 +41,7 @@ Structural finding: the market is young (the Karpathy pattern dates from late 20
 | Optional YAML/OWL/RDF ontology | llmwiki has proprietary JSON profiles (CLP) but no standard formats; SaussuNet speaks semantic-web languages when the user needs them | HIGH | Ontology = extension of SCHEMA.md (classes, typed relations, display); default = embedded llm-wiki ontology |
 | Bidirectional MCP (consume + expose) | llmwiki only exposes; Basic Memory only has the conversational read/write side | MEDIUM | Both sides share the vault abstraction; capitalize on rmcp |
 | Web review/edit UI + pipeline tracking | llmwiki viewer = read-only; second-brain = zero UI. A real review queue (before/after diff, approve/reject batch) is rare and it is the promised guardrail | HIGH | Pre/post-run snapshots → diff → review (AI-ownership pattern); SQLite pipeline state |
-| Embeddable library (`saussunet-core`) + standalone binary | llmwiki has a TS SDK but no server integration story; MoriNet will depend on the crate without duplicating | MEDIUM | All logic outside HTTP/CLI lives in the lib; the binary is just a façade |
+| Embeddable library (`saussunet-core`) + standalone binary | llmwiki has a TS SDK but no server integration story; MoriNet will depend on the crate without duplicating | MEDIUM | All logic outside HTTP/CLI lives in the lib; the binary is just a facade |
 | mdbook preview of the vault | No competitor does a static preview; reuses the MoriNet pattern | LOW | mdbook CLI, LOUD failure if absent |
 | Abstract local/API LLM provider | llmwiki supports many providers but SaussuNet targets local-first on Strix Halo (ROCm) — comfort + cost + privacy | MEDIUM | Rust trait + default impl (OpenAI-compatible API) + local impl (Ollama/llama.cpp) |
 | Freshness repair (`refresh --stale`) | llmwiki: repairs outdated pages without recompiling new sources; beyond plain lint | MEDIUM | Requires the incremental state index + source dates |
@@ -109,7 +109,7 @@ Structural finding: the market is young (the Karpathy pattern dates from late 20
 - **Review queue requires before/after diffs:** useful review shows a diff, not a final page — pre/post-run snapshot (AI-ownership pattern) or git.
 - **Contradictions require provenance:** you can only date/source two positions if every claim traces back to a raw/ file with an ingestion date.
 - **MCP pointer sources enhance continuous monitoring:** MCPs bring live data without polling; but lint must treat pointers separately (their "freshness" = reachability of the remote server, not a hash).
-- **Ontology extends SCHEMA.md:** the ontology does not replace SCHEMA, it specializes it (classes → page types, relations → typed wikilink types à la Basic Memory `depends_on [[X]]`). Building it before the taxonomy lint would leave it unverified.
+- **Ontology extends SCHEMA.md:** the ontology does not replace SCHEMA, it specializes it (classes → page types, relations → typed wikilink types a la Basic Memory `depends_on [[X]]`). Building it before the taxonomy lint would leave it unverified.
 - **Multi-vaults conflicts with monolithic state:** adding multi-vaults after the fact touches config, SQLite schema, paths, queue — an architecture decision to make in phase 1 even if only one vault ships.
 - **Auto-publish conflicts with review queue:** reconcilable via a per-type policy (minor update auto / creation-merge-archive in review), not via a single global toggle.
 
