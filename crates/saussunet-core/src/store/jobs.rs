@@ -33,15 +33,33 @@ impl Store {
         Ok(res.last_insert_rowid())
     }
 
-    pub async fn list_jobs(&self, vault_id: i64) -> Result<Vec<Job>> {
-        let rows = sqlx::query_as::<_, Job>(
-            "SELECT id, vault_id, kind, payload_json, status, priority, attempts, error, \
-             created_at, claimed_at, finished_at \
-             FROM jobs WHERE vault_id = ? ORDER BY id",
-        )
-        .bind(vault_id)
-        .fetch_all(&self.pool)
-        .await?;
+    /// List a vault's jobs (VLET-04: vault id on every call). Optional
+    /// status filter; claim order (`priority DESC, created_at`) so the
+    /// Phase-2 worker reads in the same order it will claim. No claim /
+    /// claim-expiry / retry logic here — Phase 2 owns queue behavior (D-02).
+    pub async fn list_jobs(&self, vault_id: i64, status: Option<&str>) -> Result<Vec<Job>> {
+        let rows =
+            match status {
+                Some(status) => sqlx::query_as::<_, Job>(
+                    "SELECT id, vault_id, kind, payload_json, status, priority, attempts, error, \
+                     created_at, claimed_at, finished_at \
+                     FROM jobs WHERE vault_id = ? AND status = ? \
+                     ORDER BY priority DESC, created_at, id",
+                )
+                .bind(vault_id)
+                .bind(status)
+                .fetch_all(&self.pool)
+                .await?,
+                None => sqlx::query_as::<_, Job>(
+                    "SELECT id, vault_id, kind, payload_json, status, priority, attempts, error, \
+                     created_at, claimed_at, finished_at \
+                     FROM jobs WHERE vault_id = ? \
+                     ORDER BY priority DESC, created_at, id",
+                )
+                .bind(vault_id)
+                .fetch_all(&self.pool)
+                .await?,
+            };
         Ok(rows)
     }
 }

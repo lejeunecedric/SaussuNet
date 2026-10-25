@@ -57,6 +57,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Rebuild page_registry from the vault filesystem (D-01: the DB is a
+    /// disposable projection — deleting it costs zero content).
+    Reindex,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -96,6 +99,12 @@ fn main() -> anyhow::Result<()> {
                 .enable_all()
                 .build()?
                 .block_on(conflicts_cmd(json))?;
+        }
+        Some(Command::Reindex) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(reindex_cmd())?;
         }
     }
 
@@ -184,5 +193,22 @@ async fn conflicts_cmd(json: bool) -> anyhow::Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+/// `reindex` command: same boot wiring, then the D-01 rebuildability proof —
+/// scan the vault and rebuild `page_registry` from scratch. Prints
+/// `reindexed: N pages`; malformed pages print a `skipped` stderr line and
+/// are excluded from the count (exit stays 0, T-04-02).
+async fn reindex_cmd() -> anyhow::Result<()> {
+    let config_path = std::path::Path::new("config.toml");
+    let cfg = load_config_or_default(config_path)?;
+    let rt = cfg.resolve();
+    if config_path.exists() {
+        saussunet_core::assert_outside_vault(config_path, &rt.vault_root)?;
+    }
+    let (store, vault) = saussunet_core::boot_open(&rt).await?;
+    let n = saussunet_core::reindex::reindex(&vault, &store).await?;
+    println!("reindexed: {n} pages");
     Ok(())
 }

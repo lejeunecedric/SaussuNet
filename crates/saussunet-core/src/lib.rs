@@ -8,6 +8,7 @@
 
 pub mod config;
 pub mod error;
+pub mod reindex;
 pub mod store;
 pub mod vault;
 
