@@ -220,6 +220,42 @@ async fn rejects_reserved_root_files_without_touching_them() {
 }
 
 #[tokio::test]
+async fn unreadable_existing_page_refuses_write() {
+    // Review W-4: a non-NotFound read failure on the existing page must NOT
+    // be swallowed as "file does not exist" — the write is refused, never
+    // silently overwritten over an unreadable (possibly protected) page.
+    use std::os::unix::fs::PermissionsExt;
+    let (_tmp, vault, store) = setup().await;
+    let rel = "concepts/locked.md";
+    write_page(&vault, &store, rel, &page("Locked", 2))
+        .await
+        .expect("first write");
+    let file = vault.root().join(rel);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_to_string(&file).is_ok() {
+        // Running as root: chmod cannot block reads — skip gracefully.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        return;
+    }
+    let err = write_page(&vault, &store, rel, &page("Overwriter", 2))
+        .await
+        .unwrap_err();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("io error"),
+        "expected propagated io error, got: {msg}"
+    );
+    // The on-disk page is untouched: still the original writer output.
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        content.contains("title: Locked"),
+        "page must not be overwritten"
+    );
+    assert!(!content.contains("Overwriter"));
+}
+
+#[tokio::test]
 async fn update_preserves_created_bumps_updated_and_dedupes_index() {
     let (_tmp, vault, store) = setup().await;
     write_page(

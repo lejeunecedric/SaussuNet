@@ -86,7 +86,20 @@ pub async fn write_page(
     let target = vault.resolve_page_path(rel_path).await?;
 
     // Read-before-validate: existence decides create vs update semantics.
-    let existing = tokio::fs::read_to_string(&target).await.ok();
+    // Review W-4: ONLY NotFound means "no file yet". Any other read failure
+    // (EACCES, EIO, EISDIR…) is propagated and the write refused — swallowing
+    // it would treat an unreadable protected/human-owned page as a first
+    // write and overwrite it (rename needs only directory permission).
+    let existing = match tokio::fs::read_to_string(&target).await {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(CoreError::Io {
+                path: target.clone(),
+                source: e,
+            })
+        }
+    };
 
     // 2. Frontmatter: split (never truncates), parse, validate vs taxonomy.
     let (yaml, body) = frontmatter::split(content);
