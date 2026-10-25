@@ -235,12 +235,20 @@ pub fn compute_map(fm_yaml: &str, body: &str) -> BTreeMap<String, String> {
     map
 }
 
-/// True iff any key present in `stored` has a different value in `current`
-/// (changed OR removed). Sections the agent newly ADDS are not human edits.
+/// True iff the on-disk file diverges from the map the writer recorded:
+/// any key present in `stored` has a different value in `current` (changed
+/// OR removed), or `current` carries a key absent from `stored` — a section
+/// added to the file after the writer's last write (review W-3). The writer
+/// re-embeds the FULL map on every write, so an unmapped on-disk key can
+/// only be a human addition; D-06 forbids silently deleting it, so it routes
+/// to conflict exactly like a changed section. (Sections the agent adds to
+/// the INCOMING content are unaffected: `current` is computed over the
+/// on-disk file, not the incoming page.)
 pub fn human_edited(stored: &BTreeMap<String, String>, current: &BTreeMap<String, String>) -> bool {
     stored
         .iter()
         .any(|(k, v)| current.get(k).map(|c| c != v).unwrap_or(true))
+        || current.keys().any(|k| !stored.contains_key(k))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -301,11 +309,13 @@ mod tests {
     }
 
     #[test]
-    fn human_edited_flags_changed_and_removed_but_not_added() {
+    fn human_edited_flags_changed_removed_and_added() {
         let stored = compute_map("title: X\n", "## One\na\n\n## Two\nb\n");
-        // Agent adds a section: not a human edit.
-        let added = compute_map("title: X\n", "## One\na\n\n## Two\nb\n\n## Three\nc\n");
-        assert!(!human_edited(&stored, &added));
+        // Review W-3: a section present in the file but absent from the
+        // stored map is a human ADDITION (the writer re-embeds the full map
+        // on every write, so an unmapped key can only be human) → flagged.
+        let added = compute_map("title: X\n", "## One\na\n\n## Two\nb\n\n## My Notes\nc\n");
+        assert!(human_edited(&stored, &added));
         // Human changes a section.
         let changed = compute_map("title: X\n", "## One\nEDITED\n\n## Two\nb\n");
         assert!(human_edited(&stored, &changed));

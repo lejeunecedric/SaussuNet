@@ -55,6 +55,50 @@ async fn pending(store: &Store) -> Vec<saussunet_core::store::Proposal> {
 }
 
 #[tokio::test]
+async fn human_added_section_routes_to_conflict_and_survives() {
+    // Review W-3 (D-06 intent): a section PRESENT IN THE FILE but absent
+    // from the stored gen_hash map is a human addition → conflict, never a
+    // silent deletion on the next regeneration.
+    let (_tmp, vault, store) = setup().await;
+    let rel = "concepts/adder.md";
+    write_page(&vault, &store, rel, &page("Adder", "Section A v1."))
+        .await
+        .expect("first write");
+
+    // Human appends a brand-new section (changes no existing hash).
+    let file = read(&vault, rel);
+    let with_notes = format!(
+        "{}\n\n## My Notes\nHuman thoughts, keep me.\n",
+        file.trim_end()
+    );
+    std::fs::write(vault.root().join(rel), &with_notes).expect("human append");
+
+    let outcome = write_page(&vault, &store, rel, &page("Adder", "Section A v2."))
+        .await
+        .expect("write_page");
+    match outcome {
+        WriteOutcome::ConflictRecorded {
+            reason,
+            proposal_id,
+        } => {
+            assert_eq!(reason, "gen_hash_mismatch");
+            assert!(proposal_id > 0);
+        }
+        other => panic!("expected ConflictRecorded, got {other:?}"),
+    }
+    // The human section is intact on disk and the agent's v2 did NOT land.
+    let after = read(&vault, rel);
+    assert!(after.contains("## My Notes"), "human section must survive");
+    assert!(after.contains("Human thoughts, keep me."));
+    assert!(
+        after.contains("Section A v1."),
+        "file must not be overwritten"
+    );
+    assert!(!after.contains("Section A v2."));
+    assert_eq!(pending(&store).await.len(), 1, "conflict proposal recorded");
+}
+
+#[tokio::test]
 async fn human_edit_survives_regeneration() {
     // THE headline SC3 test (PITFALLS recipe: edit → re-ingest → survives).
     let (_tmp, vault, store) = setup().await;
