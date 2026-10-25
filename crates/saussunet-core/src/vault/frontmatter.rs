@@ -127,13 +127,79 @@ pub fn validate_page(fm: &PageFrontmatter, taxonomy: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Serialize frontmatter + body back into a page. Key order is stable
-/// (title, created, updated, type, tags, sources, then optional fields,
-/// then preserved unknown keys — serde declaration order).
+/// Serialize frontmatter + body back into a page in llm-wiki house style:
+/// stable key order (title, created, updated, type, tags, sources, then
+/// present optional fields, then preserved unknown keys), bare `YYYY-MM-DD`
+/// dates and inline lists (MoriNet rule: values stay plain strings — no
+/// YAML date typing), closing `---` on its own line.
 pub fn serialize(fm: &PageFrontmatter, body: &str) -> String {
-    // Serialization of our own struct cannot fail (plain string fields).
-    let yaml = serde_yml::to_string(fm).expect("PageFrontmatter must serialize to YAML");
-    format!("---\n{yaml}---\n\n{body}")
+    let mut out = String::from("---\n");
+    out.push_str(&format!("title: {}\n", scalar(&fm.title)));
+    out.push_str(&format!("created: {}\n", scalar(&fm.created)));
+    out.push_str(&format!("updated: {}\n", scalar(&fm.updated)));
+    out.push_str(&format!("type: {}\n", scalar(&fm.page_type)));
+    out.push_str(&format!("tags: {}\n", flow(&fm.tags)));
+    out.push_str(&format!("sources: {}\n", flow(&fm.sources)));
+    if let Some(c) = &fm.confidence {
+        out.push_str(&format!("confidence: {}\n", scalar(c)));
+    }
+    if let Some(v) = fm.contested {
+        out.push_str(&format!("contested: {v}\n"));
+    }
+    if let Some(list) = &fm.contradictions {
+        out.push_str(&format!("contradictions: {}\n", flow(list)));
+    }
+    if let Some(v) = fm.protected {
+        out.push_str(&format!("protected: {v}\n"));
+    }
+    if let Some(map) = &fm.gen_hash {
+        out.push_str("gen_hash:\n");
+        for (k, v) in map {
+            out.push_str(&format!("  {}: {}\n", scalar(k), scalar(v)));
+        }
+    }
+    if !fm.other.is_empty() {
+        let mut extra = serde_yml::to_string(&fm.other).expect("preserved keys must re-serialize");
+        if !extra.ends_with('\n') {
+            extra.push('\n');
+        }
+        out.push_str(&extra);
+    }
+    out.push_str("---\n");
+    // The blank line after the closing delimiter belongs to the body per
+    // the split contract — do not double it when body already starts one.
+    if !body.starts_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(body);
+    out
+}
+
+/// Plain scalar when safe (llm-wiki house style keeps dates bare), quoted
+/// via serde_yml when the value could confuse a YAML parser.
+fn scalar(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || " ._-/".contains(c))
+        && !s.ends_with(' ')
+        && !matches!(
+            s.to_ascii_lowercase().as_str(),
+            "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "~"
+        );
+    if safe {
+        s.to_string()
+    } else {
+        serde_yml::to_string(&s.to_string())
+            .expect("string must serialize")
+            .trim_end()
+            .to_string()
+    }
+}
+
+/// Inline flow list (`[a, b]`) per the llm-wiki frontmatter template.
+fn flow(items: &[String]) -> String {
+    let inner: Vec<String> = items.iter().map(|i| scalar(i)).collect();
+    format!("[{}]", inner.join(", "))
 }
 
 /// Count DISTINCT `[[target]]` wikilink targets in `body` (VLET-01 floor is
@@ -281,6 +347,21 @@ mod tests {
         assert!(pos("type:") < pos("tags:"));
         assert!(pos("tags:") < pos("sources:"));
         assert!(out.contains("---\n\nbody\n"));
+    }
+
+    #[test]
+    fn serialize_output_reparses_identically() {
+        let fm = valid_fm();
+        let page_out = serialize(&fm, "body\n");
+        let (yaml, body) = split(&page_out);
+        let fm2 = parse(yaml).unwrap();
+        assert_eq!(fm, fm2, "writer output must re-parse identically");
+        // Per the split contract the blank line after the closing `---`
+        // belongs to the body, and serialize does not double it.
+        assert_eq!(body, "\nbody\n");
+        // llm-wiki house style: bare dates, inline lists.
+        assert!(page_out.contains("created: 2026-10-25\n"));
+        assert!(page_out.contains("tags: [technology]\n"));
     }
 
     #[test]
