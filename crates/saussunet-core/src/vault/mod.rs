@@ -7,6 +7,7 @@
 
 pub mod atomic;
 pub mod frontmatter;
+pub mod ghash;
 pub mod index;
 pub mod log;
 pub mod schema;
