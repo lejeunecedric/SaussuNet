@@ -12,8 +12,13 @@
 //! - On ANY failure path the temp file is removed before the error returns;
 //!   `rename` is the last step, so a crash mid-write can only leave a temp
 //!   file, never a half-written page (ROADMAP SC2).
+//! - Durability (review W-1): the temp file is `fsync`ed BEFORE the rename
+//!   and the parent directory is fsynced (best-effort) after it, so the SC2
+//!   guarantee holds for machine crashes, not just process crashes.
 
 use std::path::Path;
+
+use tokio::io::AsyncWriteExt;
 
 use crate::error::{CoreError, Result};
 
@@ -42,12 +47,24 @@ pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         })?
         .to_string_lossy();
     let tmp = dir.join(format!(".{}.tmp-{}", file_name, uuid::Uuid::new_v4()));
-    tokio::fs::write(&tmp, bytes)
-        .await
-        .map_err(|e| CoreError::Io {
+    // Write + fsync the TEMP before renaming (review W-1): without
+    // sync_all the rename can be durable while the data blocks are not, so
+    // a machine crash could land an empty/partial page on the target path.
+    let write_result = async {
+        let mut file = tokio::fs::File::create(&tmp).await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+        std::io::Result::Ok(())
+    }
+    .await;
+    if let Err(e) = write_result {
+        // Loud cleanup: never leave the temp behind on failure (PATTERNS §2.8).
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(CoreError::Io {
             path: tmp.clone(),
             source: e,
-        })?;
+        });
+    }
     if let Err(e) = tokio::fs::rename(&tmp, path).await {
         // Loud cleanup: never leave the temp behind on failure (PATTERNS §2.8).
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -55,6 +72,13 @@ pub async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             path: path.to_path_buf(),
             source: e,
         });
+    }
+    // Best-effort fsync of the DIRECTORY so the rename itself is durable.
+    // Failure here is not fatal: the data is already on disk under the final
+    // name; worst case the rename itself is replayed-lost after a crash,
+    // which is the pre-rename (old-content) state — still whole-or-nothing.
+    if let Ok(dir_file) = tokio::fs::File::open(dir).await {
+        let _ = dir_file.sync_all().await;
     }
     Ok(())
 }
@@ -127,6 +151,24 @@ mod tests {
         let err = write_atomic(&target, b"boom").await.unwrap_err();
         assert!(matches!(err, CoreError::Io { .. }), "{err:?}");
         assert_eq!(count_temps(tmp.path()), 0, "temp must be cleaned up");
+    }
+
+    #[tokio::test]
+    async fn write_atomic_content_fully_readable_after_rename() {
+        // Review W-1 (structural): the fsync-before-rename path must produce
+        // a target whose bytes are complete and identical after the rename,
+        // with no temp leftovers — the durability half of the SC2 claim.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("durable/page.md");
+        let payload = "x".repeat(64 * 1024); // larger than a pipe buffer
+        write_atomic(&target, payload.as_bytes()).await.unwrap();
+        let read_back = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(read_back, payload, "content must be whole after rename");
+        assert_eq!(count_temps(&tmp.path().join("durable")), 0);
+        // Overwrite keeps the same guarantee.
+        write_atomic(&target, b"second").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "second");
+        assert_eq!(count_temps(&tmp.path().join("durable")), 0);
     }
 
     #[tokio::test]
