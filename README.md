@@ -82,13 +82,39 @@ Built with disciplined GSD planning workflows — every phase has context, plans
 
 Rust · tokio · axum · sqlx (SQLite, WAL) · rmcp · askama + htmx (SSR, zero node toolchain) · pulldown-cmark · serde_yml — one static binary, localhost binds by default.
 
-## Development
+## Quickstart
 
 ```bash
-cargo build
-cargo test
-bash scripts/check.sh   # fmt + clippy -D warnings + tests + guards
+cargo build --release
+./target/release/saussunet init-vault   # or bare run: creates ./data/vaults/1 + saussunet.db (WAL)
+./target/release/saussunet write-page --path concepts/demo.md --from demo.md
+./target/release/saussunet conflicts    # human-edit conflicts awaiting review
+./target/release/saussunet reindex      # rebuild SQLite from the vault files (D-01)
+./target/release/saussunet init         # write a config.toml template
+bash scripts/check.sh                   # fmt + clippy -D warnings + tests + guards + release build
 ```
+
+`demo.md` — llm-wiki pages need full frontmatter and ≥2 outbound wikilinks:
+
+```markdown
+---
+title: Demo Page
+created: 2026-10-25
+updated: 2026-10-25
+type: concept
+tags: [technology]
+sources: [raw/articles/demo.md]
+---
+
+A demo concept. See [[alpha]] and [[beta]].
+```
+
+## Decisions (Phase 1)
+
+- **sqlx pinned 0.8** (resolves 0.8.6): MoriNet alignment for library interop (QUAL-05) — see [SKELETON.md](.planning/phases/01-workspace-foundations-vault-writer/SKELETON.md).
+- **CLI-only operability until Phase 5**: Phase 1 opens no listener; the resolved config pins the `bind` default to `127.0.0.1`.
+- **Vault FS is truth; SQLite is a rebuildable projection** (D-01): `reindex` rebuilds `page_registry` from the files — deleting the DB costs zero content.
+- **One vault shipped, multi-vault-ready** (D-03/D-04): config, schema, paths, and store APIs all carry a vault id.
 
 ## License
 
