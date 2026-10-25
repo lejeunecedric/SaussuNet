@@ -31,6 +31,12 @@ const DIRECTORIES: [&str; 8] = [
     "queries",
 ];
 
+/// The four writable page directories. `write_page` targets pages only:
+/// `raw/` is the immutable evidence layer and vault-root files (SCHEMA.md,
+/// index.md, log.md, log-*.md) are writer-managed — a page write may never
+/// land anywhere else (review C-1; `reindex` scans exactly these dirs).
+pub const PAGE_DIRS: [&str; 4] = ["entities", "concepts", "comparisons", "queries"];
+
 /// A vault on disk. `root` is always `data/vaults/<db row id>` (D-04).
 ///
 /// NOT `Clone` on purpose: `write_lock` is the per-vault single-writer lock
@@ -84,9 +90,12 @@ impl Vault {
     /// Guard order (MoriNet WebDAV lesson: canonicalize BEFORE trusting):
     /// 1. reject empty, absolute, any `..` segment, and any path under `raw/`
     ///    (immutable evidence layer — page writes never touch it, Pitfall 4);
-    /// 2. join to root, canonicalize the deepest existing ancestor, and
+    /// 2. require the first component to be one of [`PAGE_DIRS`] — anything
+    ///    else (reserved root files like `index.md`/`SCHEMA.md`/`log.md`,
+    ///    stray directories) is refused before any mutation (review C-1);
+    /// 3. join to root, canonicalize the deepest existing ancestor, and
     ///    assert prefix containment against the canonical root;
-    /// 3. reject a target that exists as a symlink (it could point outside).
+    /// 4. reject a target that exists as a symlink (it could point outside).
     pub async fn resolve_page_path(&self, rel: &str) -> Result<PathBuf> {
         if rel.trim().is_empty() {
             return Err(CoreError::Vault("path must be non-empty".to_string()));
@@ -110,6 +119,15 @@ impl Vault {
                         "raw/ is the immutable evidence layer; page writes are refused (Pitfall 4)"
                             .to_string(),
                     ))
+                }
+                Component::Normal(name)
+                    if first && !PAGE_DIRS.contains(&name.to_string_lossy().as_ref()) =>
+                {
+                    return Err(CoreError::Vault(format!(
+                        "pages must live under entities/, concepts/, comparisons/, or queries/; \
+                         vault root files (SCHEMA.md, index.md, log.md, log-*.md) are \
+                         writer-managed and refused, got {rel:?}"
+                    )))
                 }
                 Component::Normal(_) => {}
                 other => {
@@ -239,6 +257,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_root_files_and_non_page_dirs() {
+        // Review C-1: only the four page directories are writable; reserved
+        // root files (SCHEMA.md, index.md, log.md, log-*.md) and any other
+        // first component are refused.
+        let tmp = TempDir::new().unwrap();
+        let vault = vault_in_tmp(&tmp).await;
+        for rel in [
+            "index.md",
+            "SCHEMA.md",
+            "log.md",
+            "log-2026-10.md",
+            "notes.md",
+            "other/x.md",
+        ] {
+            let err = vault.resolve_page_path(rel).await.unwrap_err().to_string();
+            assert!(err.contains("entities/"), "{rel}: {err}");
+        }
+        // The four page directories all resolve.
+        for dir in ["entities", "concepts", "comparisons", "queries"] {
+            let rel = format!("{dir}/x.md");
+            assert!(vault.resolve_page_path(&rel).await.is_ok(), "{rel}");
+        }
+    }
+
+    #[tokio::test]
     async fn rejects_empty_path() {
         let tmp = TempDir::new().unwrap();
         let vault = vault_in_tmp(&tmp).await;
@@ -252,10 +295,13 @@ mod tests {
         // A page that is a symlink pointing outside the vault root.
         let outside = tmp.path().join("..").join("outside-secret.md");
         atomic::write_atomic(&outside, b"secret").await.unwrap();
-        std::os::unix::fs::symlink(outside.canonicalize().unwrap(), tmp.path().join("spy.md"))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            outside.canonicalize().unwrap(),
+            tmp.path().join("concepts/spy.md"),
+        )
+        .unwrap();
         let err = vault
-            .resolve_page_path("spy.md")
+            .resolve_page_path("concepts/spy.md")
             .await
             .unwrap_err()
             .to_string();
@@ -269,12 +315,12 @@ mod tests {
         let outside_dir = TempDir::new().unwrap();
         std::os::unix::fs::symlink(
             outside_dir.path().canonicalize().unwrap(),
-            tmp.path().join("escape"),
+            tmp.path().join("concepts/escape"),
         )
         .unwrap();
         // canonicalize resolves the symlinked dir → prefix check must fire.
         let err = vault
-            .resolve_page_path("escape/x.md")
+            .resolve_page_path("concepts/escape/x.md")
             .await
             .unwrap_err()
             .to_string();

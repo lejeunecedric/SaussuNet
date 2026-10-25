@@ -13,11 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{CoreError, Result};
 use crate::store::Store;
-use crate::vault::{frontmatter, Vault};
-
-/// The four writable page directories scanned for the registry (the `raw/`
-/// evidence layer and root files like index.md are not registry pages).
-const PAGE_DIRS: [&str; 4] = ["entities", "concepts", "comparisons", "queries"];
+use crate::vault::{frontmatter, Vault, PAGE_DIRS};
 
 /// Rebuild `page_registry` for `vault` from its filesystem contents:
 /// `clear_pages(vault.id)` (scoped DELETE — only this vault's rows,

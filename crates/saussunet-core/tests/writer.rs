@@ -186,6 +186,40 @@ async fn writer_rejects_raw_and_traversal_paths() {
 }
 
 #[tokio::test]
+async fn rejects_reserved_root_files_without_touching_them() {
+    // Review C-1 regression: `write-page --path index.md` / `SCHEMA.md` used
+    // to clobber writer-managed vault root files. The path guard must refuse
+    // anything outside the four page directories BEFORE any mutation, and
+    // the reserved files' bytes must be untouched.
+    let (_tmp, vault, store) = setup().await;
+    for rel in [
+        "index.md",
+        "SCHEMA.md",
+        "log.md",
+        "log-2026-10.md",
+        "notes.md",
+        "other/dir/x.md",
+    ] {
+        let before = std::fs::read(vault.root().join(rel)).ok();
+        let err = write_page(&vault, &store, rel, &page("Clobber", 2))
+            .await
+            .expect_err("reserved/out-of-scope path must be refused");
+        assert!(
+            err.to_string().contains("entities/"),
+            "clear error naming the page dirs, got: {err}"
+        );
+        let after = std::fs::read(vault.root().join(rel)).ok();
+        assert_eq!(before, after, "{rel} bytes must be unchanged");
+    }
+    // index.md still well-formed (writer-managed sections intact).
+    let index = std::fs::read_to_string(vault.root().join("index.md")).unwrap();
+    assert!(
+        index.contains("## Concepts"),
+        "index.md must not be clobbered"
+    );
+}
+
+#[tokio::test]
 async fn update_preserves_created_bumps_updated_and_dedupes_index() {
     let (_tmp, vault, store) = setup().await;
     write_page(
