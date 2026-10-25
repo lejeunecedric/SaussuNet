@@ -10,6 +10,7 @@ pub mod frontmatter;
 pub mod index;
 pub mod log;
 pub mod schema;
+pub mod writer;
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};

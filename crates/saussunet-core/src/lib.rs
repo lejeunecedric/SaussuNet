@@ -21,9 +21,15 @@ pub use crate::store::Store;
 
 /// Shared boot path (ROADMAP SC1): the bare run and `init-vault` both call
 /// this, and `tests/init_vault.rs` drives the exact production sequence.
-/// Order per PATTERNS §2.7: safety check → Store::connect (WAL + migrations) →
-/// ensure_vault → Vault::init_fs. Returns the canonical vault root.
+/// Returns the canonical vault root.
 pub async fn boot(cfg: &RuntimeConfig) -> Result<PathBuf> {
+    let (_store, vault) = boot_open(cfg).await?;
+    Ok(vault.root)
+}
+
+/// Boot and hand back the live `(Store, Vault)` pair — the shape the
+/// `write-page` CLI needs (same production sequence as [`boot`]).
+pub async fn boot_open(cfg: &RuntimeConfig) -> Result<(Store, Vault)> {
     // Threat T-01-01: the DB must never live inside the vault — a vault is
     // served/previewed later (mdbook, MCP) and everything inside it leaks.
     assert_outside_vault(&cfg.db_path, &cfg.vault_root)?;
@@ -46,7 +52,8 @@ pub async fn boot(cfg: &RuntimeConfig) -> Result<PathBuf> {
         path: vault.root.clone(),
         source: e,
     })?;
-    Ok(root)
+    let vault = Vault::new(row.id, row.name, root);
+    Ok((store, vault))
 }
 
 /// Fail with an actionable error if `path` resolves inside `vault_root`

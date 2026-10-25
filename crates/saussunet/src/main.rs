@@ -10,6 +10,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 use saussunet_core::config::load_config_or_default;
+use saussunet_core::error::CoreError;
 
 #[derive(Parser)]
 #[command(
@@ -37,6 +38,16 @@ enum Command {
     },
     /// Boot: config → SQLite (WAL) + migrations → vault FS init → "vault ready".
     InitVault,
+    /// Write a wiki page through the sole vault writer (validation + atomic +
+    /// index/log updates). `--from` is the source markdown file.
+    WritePage {
+        /// Vault-relative page path, e.g. concepts/foo.md.
+        #[arg(long)]
+        path: String,
+        /// Local markdown file with the page content (frontmatter included).
+        #[arg(long)]
+        from: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -65,6 +76,12 @@ fn main() -> anyhow::Result<()> {
                 .build()?
                 .block_on(boot())?;
         }
+        Some(Command::WritePage { path, from }) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(write_page_cmd(&path, &from))?;
+        }
     }
 
     Ok(())
@@ -85,4 +102,30 @@ async fn boot() -> anyhow::Result<()> {
     let root = saussunet_core::boot(&rt).await?;
     println!("vault ready: {}", root.display());
     Ok(())
+}
+
+/// `write-page` command: same boot wiring (config → store → vault), then
+/// the sole writer. Validation rejections (frontmatter/vault path errors)
+/// print the cause to stderr and exit 1; other errors propagate to anyhow.
+async fn write_page_cmd(rel_path: &str, from: &std::path::Path) -> anyhow::Result<()> {
+    let config_path = std::path::Path::new("config.toml");
+    let cfg = load_config_or_default(config_path)?;
+    let rt = cfg.resolve();
+    if config_path.exists() {
+        saussunet_core::assert_outside_vault(config_path, &rt.vault_root)?;
+    }
+    let content =
+        std::fs::read_to_string(from).with_context(|| format!("cannot read {}", from.display()))?;
+    let (store, vault) = saussunet_core::boot_open(&rt).await?;
+    match saussunet_core::vault::writer::write_page(&vault, &store, rel_path, &content).await {
+        Ok(_) => {
+            println!("wrote {rel_path}");
+            Ok(())
+        }
+        Err(e @ (CoreError::Frontmatter(_) | CoreError::Vault(_))) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        Err(e) => Err(e.into()),
+    }
 }
