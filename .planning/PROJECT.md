@@ -16,7 +16,7 @@ Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-d
 
 <!-- Shipped and confirmed valuable. -->
 
-(None yet — ship to validate)
+- [x] Rust workspace: `saussunet-core` (lib) + standalone web binary; MoriNet can depend on the lib later — Validated in Phase 1 (zero-axum core enforced by CI guard, sqlx 0.8 pinned for MoriNet interop)
 
 ### Active
 
@@ -30,7 +30,6 @@ Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-d
 - [ ] Abstract LLM provider: local (Strix Halo / ROCm) or cloud API, interchangeable
 - [ ] Web UI: source + ontology config, pipeline monitoring (ingestion, errors), review/editing of generated notes
 - [ ] mdbook preview of the vault, configured like in MoriNet
-- [ ] Rust workspace: `saussunet-core` (lib) + standalone web binary; MoriNet can depend on the lib later
 - [ ] Deployment to our server (MoriNet pattern: deploy script + systemd/nginx), with server config kept in a **gitignored** file — never in the repo
 
 ### Out of Scope

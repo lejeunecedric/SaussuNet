@@ -9,10 +9,10 @@ Requirements for initial release (lean v1). Each maps to roadmap phases.
 
 ### Vault Core
 
-- [ ] **VLET-01**: The system writes vault pages following llm-wiki conventions: YAML frontmatter (title/created/updated/type/tags/sources), `[[wikilinks]]` (min 2 outbound per page), `index.md` catalog, append-only `log.md`, immutable `raw/` layer
-- [ ] **VLET-02**: A single vault-writer component is the sole author of vault files; all writes are atomic (write-temp + rename) so a crash never leaves a half-written page
-- [ ] **VLET-03**: Human edits to generated pages are preserved across regeneration (three-way merge via per-section `gen_hash`)
-- [ ] **VLET-04**: The data model is multi-vault-ready (config, SQLite schema, paths, queues carry a vault id) even though v1 ships one vault
+- [x] **VLET-01**: The system writes vault pages following llm-wiki conventions: YAML frontmatter (title/created/updated/type/tags/sources), `[[wikilinks]]` (min 2 outbound per page), `index.md` catalog, append-only `log.md`, immutable `raw/` layer
+- [x] **VLET-02**: A single vault-writer component is the sole author of vault files; all writes are atomic (write-temp + rename) so a crash never leaves a half-written page
+- [x] **VLET-03**: Human edits to generated pages are preserved across regeneration (three-way merge via per-section `gen_hash`)
+- [x] **VLET-04**: The data model is multi-vault-ready (config, SQLite schema, paths, queues carry a vault id) even though v1 ships one vault
 
 ### Ingestion Pipeline
 
@@ -55,8 +55,8 @@ Requirements for initial release (lean v1). Each maps to roadmap phases.
 
 ### Platform & Deployment
 
-- [ ] **INFR-01**: The project is a Cargo workspace: `crates/saussunet-core` (library, zero axum/HTTP-server dependency) + `crates/saussunet` (standalone web binary owning all transports)
-- [ ] **INFR-02**: The binary runs self-hosted with SQLite (WAL) and no external services; localhost binds by default
+- [x] **INFR-01**: The project is a Cargo workspace: `crates/saussunet-core` (library, zero axum/HTTP-server dependency) + `crates/saussunet` (standalone web binary owning all transports)
+- [x] **INFR-02**: The binary runs self-hosted with SQLite (WAL) and no external services; localhost binds by default
 - [ ] **INFR-03**: Deployment to our server works via a deploy script whose server config lives in a gitignored file (example template committed, real config never)
 
 ## v2 Requirements
@@ -103,12 +103,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| VLET-01 | Phase 1 | Pending |
-| VLET-02 | Phase 1 | Pending |
-| VLET-03 | Phase 1 | Pending |
-| VLET-04 | Phase 1 | Pending |
-| INFR-01 | Phase 1 | Pending |
-| INFR-02 | Phase 1 | Pending |
+| VLET-01 | Phase 1 | Complete |
+| VLET-02 | Phase 1 | Complete |
+| VLET-03 | Phase 1 | Complete |
+| VLET-04 | Phase 1 | Complete |
+| INFR-01 | Phase 1 | Complete |
+| INFR-02 | Phase 1 | Complete |
 | LLMP-01 | Phase 2 | Pending |
 | LLMP-02 | Phase 2 | Pending |
 | SRCC-03 | Phase 2 | Pending |
