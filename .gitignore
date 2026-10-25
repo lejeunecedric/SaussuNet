@@ -1,0 +1,15 @@
+# Rust
+/target/
+
+# Config serveur de déploiement — JAMAIS versionnée (gabarit : deploy.example.sh)
+deploy.local.sh
+.env.deploy
+.deploy/
+
+# Vault de démo local / données runtime
+/vaults/
+*.local.toml
+
+# Divers
+.DS_Store
+*.log

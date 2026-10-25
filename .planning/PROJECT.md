@@ -31,6 +31,7 @@ Faire entrer des sources brutes (Drive, WebDAV, web, MCP) et obtenir **en contin
 - [ ] UI web : config sources + ontologie, suivi pipeline (ingestion, erreurs), revue/édition des notes générées
 - [ ] Preview mdbook du vault, configuré comme dans MoriNet
 - [ ] Workspace Rust : `saussunet-core` (lib) + binaire web standalone ; MoriNet pourra dépendre de la lib
+- [ ] Déploiement sur notre serveur (pattern MoriNet : script de deploy + systemd/nginx), avec la config serveur dans un fichier **gitignoré** — jamais dans le repo
 
 ### Out of Scope
 
@@ -57,6 +58,7 @@ Faire entrer des sources brutes (Drive, WebDAV, web, MCP) et obtenir **en contin
 - **Sources MCP** : ne jamais copier le contenu distant dans le vault — uniquement des notes pointeurs avec l'adresse du point d'accès
 - **Continuité** : surveillance continue (poll WebDAV/Drive, streams MCP), pas seulement un build ponctuel
 - **Preview** : mdbook CLI comme MoriNet (présent dans le PATH, échec LOUD si absent)
+- **Déploiement** : sur notre serveur (pattern MoriNet `deploy.sh`), mais la config serveur (hôtes, chemins, credentials systemd) vit dans un fichier **gitignoré** (ex. `deploy.local.sh` / `.env.deploy`) — le repo ne contient que le gabarit d'exemple
 
 ## Key Decisions
 
@@ -69,6 +71,7 @@ Faire entrer des sources brutes (Drive, WebDAV, web, MCP) et obtenir **en contin
 | UI web complète (config, suivi, revue/édition) + preview mdbook à la MoriNet | La revue humaine des notes générées est le garde-fou qualité du pipeline IA | — Pending |
 | Workspace Rust : `saussunet-core` + binaire standalone, MoriNet pourra dépendre de la lib | Double mode standalone/intégré sans duplication de code ni couplage fort | — Pending |
 | Orthographe corrigée : SaussuNet / `saussunet` (et non SaussuNoet) | Décision utilisateur 2026-10-25 | ✓ Actée |
+| Déploiement sur notre serveur, config serveur gitignorée (gabarit d'exemple seul dans le repo) | Hôtes/chemins/credentials ne doivent jamais finir versionnés ; pattern MoriNet réutilisé sans exposer holldemo | — Pending |
 
 ## Evolution
 
