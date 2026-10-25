@@ -3,7 +3,8 @@
 //! PATTERNS §4.8 (cleaner than MoriNet's SELECT-then-INSERT under the
 //! single-writer rule).
 
-use sqlx::FromRow;
+use sqlx::sqlite::Sqlite;
+use sqlx::{Executor, FromRow};
 
 use crate::error::Result;
 
@@ -20,6 +21,57 @@ pub struct PageRecord {
     pub has_gen_hash: bool,
 }
 
+/// `upsert_page` on any executor (pool OR transaction) — lets `reindex`
+/// run clear+upserts inside one transaction (review W-6).
+#[allow(clippy::too_many_arguments)]
+async fn upsert_page_on<'a, E>(
+    exec: E,
+    vault_id: i64,
+    path: &str,
+    title: &str,
+    page_type: &str,
+    tags_json: &str,
+    updated: Option<&str>,
+    has_gen_hash: bool,
+) -> Result<()>
+where
+    E: Executor<'a, Database = Sqlite>,
+{
+    sqlx::query(
+        "INSERT INTO page_registry \
+            (vault_id, path, title, page_type, tags_json, updated, has_gen_hash) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(vault_id, path) DO UPDATE SET \
+            title = excluded.title, \
+            page_type = excluded.page_type, \
+            tags_json = excluded.tags_json, \
+            updated = excluded.updated, \
+            has_gen_hash = excluded.has_gen_hash",
+    )
+    .bind(vault_id)
+    .bind(path)
+    .bind(title)
+    .bind(page_type)
+    .bind(tags_json)
+    .bind(updated)
+    .bind(has_gen_hash)
+    .execute(exec)
+    .await?;
+    Ok(())
+}
+
+/// `clear_pages` on any executor (pool OR transaction) — review W-6.
+async fn clear_pages_on<'a, E>(exec: E, vault_id: i64) -> Result<u64>
+where
+    E: Executor<'a, Database = Sqlite>,
+{
+    let res = sqlx::query("DELETE FROM page_registry WHERE vault_id = ?")
+        .bind(vault_id)
+        .execute(exec)
+        .await?;
+    Ok(res.rows_affected())
+}
+
 impl Store {
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_page(
@@ -32,27 +84,46 @@ impl Store {
         updated: Option<&str>,
         has_gen_hash: bool,
     ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO page_registry \
-                (vault_id, path, title, page_type, tags_json, updated, has_gen_hash) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(vault_id, path) DO UPDATE SET \
-                title = excluded.title, \
-                page_type = excluded.page_type, \
-                tags_json = excluded.tags_json, \
-                updated = excluded.updated, \
-                has_gen_hash = excluded.has_gen_hash",
+        upsert_page_on(
+            &self.pool,
+            vault_id,
+            path,
+            title,
+            page_type,
+            tags_json,
+            updated,
+            has_gen_hash,
         )
-        .bind(vault_id)
-        .bind(path)
-        .bind(title)
-        .bind(page_type)
-        .bind(tags_json)
-        .bind(updated)
-        .bind(has_gen_hash)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
+    }
+
+    /// Transaction-aware upsert (review W-6): `reindex` passes `&mut *tx`
+    /// so clear+repopulate commit atomically.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_page_tx<'a, E>(
+        exec: E,
+        vault_id: i64,
+        path: &str,
+        title: &str,
+        page_type: &str,
+        tags_json: &str,
+        updated: Option<&str>,
+        has_gen_hash: bool,
+    ) -> Result<()>
+    where
+        E: Executor<'a, Database = Sqlite>,
+    {
+        upsert_page_on(
+            exec,
+            vault_id,
+            path,
+            title,
+            page_type,
+            tags_json,
+            updated,
+            has_gen_hash,
+        )
+        .await
     }
 
     pub async fn list_pages(&self, vault_id: i64) -> Result<Vec<PageRecord>> {
@@ -66,12 +137,16 @@ impl Store {
         Ok(rows)
     }
 
-    /// Drop all projections for a vault (used by `reindex` in a later plan).
+    /// Drop all projections for a vault (used by `reindex`, review W-6).
     pub async fn clear_pages(&self, vault_id: i64) -> Result<u64> {
-        let res = sqlx::query("DELETE FROM page_registry WHERE vault_id = ?")
-            .bind(vault_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(res.rows_affected())
+        clear_pages_on(&self.pool, vault_id).await
+    }
+
+    /// Transaction-aware clear (review W-6).
+    pub async fn clear_pages_tx<'a, E>(exec: E, vault_id: i64) -> Result<u64>
+    where
+        E: Executor<'a, Database = Sqlite>,
+    {
+        clear_pages_on(exec, vault_id).await
     }
 }

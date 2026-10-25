@@ -96,6 +96,74 @@ async fn reindex_rebuilds_registry_after_wipe() {
     assert_eq!(store.list_pages(vault.id).await.unwrap().len(), 4);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_write_page_and_reindex_keep_registry_consistent() {
+    // Review W-6: `reindex` must hold the vault write lock for its whole
+    // scan+rebuild and do clear+repopulate in ONE transaction. Proof:
+    // while reindex hammers, a concurrent reader must NEVER observe a
+    // partial/empty registry (pre-fix the committed clear was visible
+    // between the clear and the upserts), and a concurrent write_page's
+    // row must never be lost (pre-fix its upsert could land between the
+    // reindex scan and the clear).
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (_tmp, vault, store) = setup().await;
+    let vault = std::sync::Arc::new(vault);
+    let store = std::sync::Arc::new(store);
+    for i in 0..6 {
+        let rel = format!("concepts/c{i}.md");
+        write_page(&vault, &store, &rel, &page(&format!("C{i}")))
+            .await
+            .expect("seed write");
+    }
+
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+
+    // Reindex hammer.
+    let (v, s, st) = (vault.clone(), store.clone(), stop.clone());
+    let hammer = tokio::spawn(async move {
+        for _ in 0..200 {
+            reindex(&v, &s).await.expect("reindex");
+        }
+        st.store(true, Ordering::SeqCst);
+    });
+    // Concurrent writer mid-hammer.
+    let (v, s) = (vault.clone(), store.clone());
+    let writer =
+        tokio::spawn(async move { write_page(&v, &s, "concepts/late.md", &page("Late")).await });
+    // Reader: the registry must always hold all 6 seeded pages.
+    let (v, s, st) = (vault.clone(), store.clone(), stop.clone());
+    let reader = tokio::spawn(async move {
+        let mut partial = 0usize;
+        while !st.load(Ordering::SeqCst) {
+            let rows = s.list_pages(v.id).await.unwrap();
+            if rows.len() < 6 {
+                partial += 1;
+            }
+        }
+        partial
+    });
+
+    hammer.await.expect("hammer");
+    writer.await.expect("writer").expect("late write");
+    let partial = reader.await.expect("reader");
+    assert_eq!(
+        partial, 0,
+        "reader saw a torn (partial) registry {partial} times"
+    );
+
+    // Settled state: every page on disk has its row, nothing lost.
+    let rows = store.list_pages(vault.id).await.unwrap();
+    for i in 0..6 {
+        assert!(
+            rows.iter().any(|r| r.path == format!("concepts/c{i}.md")),
+            "registry lost concepts/c{i}.md under concurrent reindex"
+        );
+    }
+    assert!(rows.iter().any(|r| r.path == "concepts/late.md"));
+    assert_eq!(reindex(&vault, &store).await.unwrap(), 7);
+    assert_eq!(store.list_pages(vault.id).await.unwrap().len(), 7);
+}
+
 #[tokio::test]
 async fn reindex_leaves_other_vault_rows_intact() {
     // T-04-03: clear/repopulate is scoped WHERE vault_id = ? — a second
