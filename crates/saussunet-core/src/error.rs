@@ -30,6 +30,19 @@ pub enum CoreError {
 
     #[error("write conflict on {path}: {reason}")]
     Conflict { path: String, reason: String },
+
+    // Phase 2 (LLMP): LLM/queue variants. `Llm` deliberately carries ONLY
+    // status + url — no body, no headers, no api_key — so nothing secret can
+    // leak through Display/Debug into logs (D-03). Construct it explicitly;
+    // there is intentionally no `#[from] reqwest::Error` conversion.
+    #[error("LLM provider error {status} from {url}")]
+    Llm { status: u16, url: String },
+
+    #[error("LLM output not parseable as JSON after repair: {0}")]
+    LlmParse(String),
+
+    #[error("queue error: {0}")]
+    Queue(String),
 }
 
 /// Convenience alias used across the core crate (never `anyhow` in the lib).

@@ -11,12 +11,21 @@ license = "MIT OR Apache-2.0"
 # PATTERNS §3). saussunet-core must never add axum/HTTP deps (Anti-Pattern 1;
 # guarded by scripts/check.sh).
 [workspace.dependencies]
-tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "fs", "sync"] }
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "fs", "sync", "time", "signal"] }
 # Pinned 0.8, NOT STACK's 0.9: MoriNet's Cargo.lock pins sqlx 0.8.6 and two
 # sqlx majors cannot coexist in one binary; QUAL-05 (saussunet-core embedded in
 # MoriNet) is the binding future constraint. See SKELETON.md "Architectural
 # Decisions" — a later 0.8→0.9 bump is a mechanical migration we control.
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+# Outbound HTTP client for the OpenAI-compatible LLM provider (Phase 2).
+# default-features = false + rustls-tls keeps the OpenSSL-free build, same
+# rationale as the sqlx pin above (QUAL-05: saussunet-core embedded in MoriNet).
+# An outbound client is allowed in core; the axum/server ban (Anti-Pattern 1)
+# is unaffected — scripts/check.sh greps only for 'axum'.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# async fn in traits is not dyn-compatible (RPITIT, E0038) on edition 2021;
+# async-trait keeps the LlmProvider trait dyn-safe for Arc<dyn LlmProvider>.
+async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yml = "0.0.13"
