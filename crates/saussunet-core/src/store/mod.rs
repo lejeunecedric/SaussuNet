@@ -12,7 +12,7 @@ mod sync_state;
 mod vaults;
 
 pub use entities::EntityRecord;
-pub use jobs::Job;
+pub use jobs::{Job, JobOutcome, BACKOFF_SECS, MAX_RETRIES};
 pub use proposals::{Proposal, ProposalSummary};
 pub use sync_state::SyncState;
 pub use vaults::VaultRow;
