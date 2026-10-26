@@ -28,7 +28,38 @@ use serde::de::DeserializeOwned;
 use crate::error::{CoreError, Result};
 
 pub mod mock;
+pub mod openai_compat;
 pub use mock::{MockProvider, Scripted};
+pub use openai_compat::OpenAiCompat;
+
+/// Single active provider selection from the resolved `[llm]` section (D-02):
+/// exactly one provider is ever constructed. `"mock"` builds an empty-script
+/// [`MockProvider`] — daemon mock mode only proves plumbing (every scripted
+/// response lives in tests, never in config). `"openai-compatible"` builds
+/// [`OpenAiCompat`] and requires an api_key (file or `SAUSSUNET_LLM__API_KEY`,
+/// D-03). Anything else is a config error.
+pub fn provider_from_config(
+    rt: &crate::config::RuntimeConfig,
+) -> Result<std::sync::Arc<dyn LlmProvider>> {
+    use std::sync::Arc;
+    match rt.llm_provider.as_str() {
+        "mock" => Ok(Arc::new(MockProvider::new(vec![]))),
+        "openai-compatible" => {
+            let api_key = rt.llm_api_key.as_ref().ok_or_else(|| {
+                CoreError::Config(
+                    "llm api_key required: set [llm].api_key or SAUSSUNET_LLM__API_KEY".to_string(),
+                )
+            })?;
+            Ok(Arc::new(OpenAiCompat::new(
+                &rt.llm_base_url,
+                &rt.llm_model,
+                api_key,
+                std::time::Duration::from_secs(rt.llm_timeout_secs),
+            )?))
+        }
+        other => Err(CoreError::Config(format!("unknown llm provider: {other}"))),
+    }
+}
 
 /// Object-safe LLM seam (ARCHITECTURE.md Pattern 2 transposed). Implementors
 /// override [`complete`](Self::complete); the default
