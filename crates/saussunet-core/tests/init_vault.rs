@@ -236,6 +236,12 @@ async fn boot_refuses_db_inside_vault_root() {
         bind: "127.0.0.1:8080".to_string(),
         vault_id: 1,
         vault_name: "main".to_string(),
+        llm_provider: "mock".to_string(),
+        llm_base_url: "https://api.openai.com/v1".to_string(),
+        llm_model: String::new(),
+        llm_api_key: None,
+        llm_max_concurrency: 1,
+        llm_timeout_secs: 300,
     };
     let err = boot(&rt).await.expect_err("must refuse db inside vault");
     assert!(err.to_string().contains("T-01-01"), "error: {err}");

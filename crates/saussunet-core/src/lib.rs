@@ -143,6 +143,19 @@ data_dir = "./data"
 # The single v1 vault (D-04): filesystem path is <data_dir>/vaults/<id>/.
 id = 1
 name = "main"
+
+[llm]
+# Single active provider (D-02): "mock" (default — deterministic, zero secrets)
+# or "openai-compatible".
+provider = "mock"
+# base_url = "https://api.openai.com/v1"
+# model = "gpt-4o-mini"
+# api_key lives here (this file is gitignored) or in the SAUSSUNET_LLM__API_KEY
+# env var, which wins over this file (D-03). Never commit a real key.
+# api_key = "replace-me"
+# Worker-pool bound; 1 is safe for a local iGPU LLM (D-04).
+# max_concurrency = 1
+# timeout_secs = 300
 "#
 }
 
