@@ -9,6 +9,7 @@
 pub mod config;
 pub mod error;
 pub mod llm;
+pub mod queue;
 pub mod reindex;
 pub mod store;
 pub mod vault;
