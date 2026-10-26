@@ -27,6 +27,9 @@ use serde::de::DeserializeOwned;
 
 use crate::error::{CoreError, Result};
 
+pub mod mock;
+pub use mock::{MockProvider, Scripted};
+
 /// Object-safe LLM seam (ARCHITECTURE.md Pattern 2 transposed). Implementors
 /// override [`complete`](Self::complete); the default
 /// [`generate_json`](Self::generate_json) implements the D-05/D-06 contract
