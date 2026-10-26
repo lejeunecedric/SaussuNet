@@ -13,7 +13,7 @@ SaussuNet is built from the ground up around the two things that cannot be retro
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Workspace Foundations + Vault Writer** - Cargo workspace, SQLite store, and the single-writer llm-wiki vault layer (atomic writes, gen_hash merge, multi-vault-ready schema) (completed 2026-10-25)
-- [ ] **Phase 2: LLM Provider + Durable Job Queue** - Abstract LlmProvider (mock + OpenAI-compatible), bounded worker pool, crash-safe SQLite job queue
+- [x] **Phase 2: LLM Provider + Durable Job Queue** - Abstract LlmProvider (mock + OpenAI-compatible), bounded worker pool, crash-safe SQLite job queue (completed 2026-10-26)
 - [ ] **Phase 3: Extraction Pipeline** - Submit a web URL or PDF and get validated, deduplicated, provenance-carrying llm-wiki pages
 - [ ] **Phase 4: Continuous Source Watching** - WebDAV watched sources polled on an interval; the vault updates itself and survives restarts
 - [ ] **Phase 5: Health Lint + Review & Monitoring UI** - Lint reports, review queue with diffs, pipeline monitoring, all config from the web UI
@@ -102,7 +102,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Workspace Foundations + Vault Writer | 4/4 | Complete    | 2026-10-25 |
-| 2. LLM Provider + Durable Job Queue | 4/5 | In Progress|  |
+| 2. LLM Provider + Durable Job Queue | 5/5 | Complete   | 2026-10-26 |
 | 3. Extraction Pipeline | 0/? | Not started | - |
 | 4. Continuous Source Watching | 0/? | Not started | - |
 | 5. Health Lint + Review & Monitoring UI | 0/? | Not started | - |
