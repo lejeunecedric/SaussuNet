@@ -111,9 +111,12 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Boot wiring (PATTERNS §2.7): load config (defaults when the file is
-/// absent) → T-01-01 config-placement check → `saussunet_core::boot`
-/// (Store::connect → ensure_vault → Vault::init_fs) → `vault ready: <path>`.
+/// Boot wiring (PATTERNS §2.7 + plan 02-05 daemon): load config (defaults
+/// when the file is absent) → T-01-01 config-placement check →
+/// `saussunet_core::boot_open` (Store::connect → ensure_vault → Vault::init_fs)
+/// → `vault ready: <path>` → provider factory from `[llm]` (D-02) → bounded
+/// worker pool sized by `max_concurrency` (D-04) → block until ctrl_c, then
+/// abort the pool. First long-lived mode — every other subcommand still exits.
 async fn boot() -> anyhow::Result<()> {
     let config_path = std::path::Path::new("config.toml");
     let cfg = load_config_or_default(config_path)?;
@@ -123,8 +126,29 @@ async fn boot() -> anyhow::Result<()> {
     if config_path.exists() {
         saussunet_core::assert_outside_vault(config_path, &rt.vault_root)?;
     }
-    let root = saussunet_core::boot(&rt).await?;
-    println!("vault ready: {}", root.display());
+    let (store, vault) = saussunet_core::boot_open(&rt).await?;
+    println!("vault ready: {}", vault.root.display());
+
+    // Daemon wiring: single active provider (D-02) + bounded pool (D-04).
+    let store = std::sync::Arc::new(store);
+    let provider = saussunet_core::llm::provider_from_config(&rt)?;
+    let worker_cfg = saussunet_core::queue::WorkerConfig {
+        max_concurrency: rt.llm_max_concurrency,
+        ..Default::default()
+    };
+    let handles = saussunet_core::queue::spawn_workers(store, provider, rt.vault_id, worker_cfg);
+    println!(
+        "queue ready: provider={} workers={}",
+        rt.llm_provider,
+        handles.len()
+    );
+
+    // NO ANALOG precedent: first long-lived mode. Ctrl-C → abort workers.
+    tokio::signal::ctrl_c().await?;
+    for h in handles {
+        h.abort();
+    }
+    println!("shutdown complete");
     Ok(())
 }
 
