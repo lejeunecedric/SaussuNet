@@ -132,16 +132,28 @@ async fn boot() -> anyhow::Result<()> {
     // Daemon wiring: single active provider (D-02) + bounded pool (D-04).
     let store = std::sync::Arc::new(store);
     let provider = saussunet_core::llm::provider_from_config(&rt)?;
-    let worker_cfg = saussunet_core::queue::WorkerConfig {
-        max_concurrency: rt.llm_max_concurrency,
-        ..Default::default()
+    // WR-03: the default "mock" provider has an empty script — draining the
+    // queue with it would fail and dead-letter every job invisibly. Skip
+    // spawning workers so jobs stay `pending` until a real provider is set.
+    let handles = if saussunet_core::llm::daemon_drains_queue(&rt) {
+        let worker_cfg = saussunet_core::queue::WorkerConfig {
+            max_concurrency: rt.llm_max_concurrency,
+            ..Default::default()
+        };
+        let handles =
+            saussunet_core::queue::spawn_workers(store, provider, rt.vault_id, worker_cfg);
+        println!(
+            "queue ready: provider={} workers={}",
+            rt.llm_provider,
+            handles.len()
+        );
+        handles
+    } else {
+        println!(
+            "mock provider: queue draining disabled — jobs stay pending              until a real [llm].provider is configured"
+        );
+        Vec::new()
     };
-    let handles = saussunet_core::queue::spawn_workers(store, provider, rt.vault_id, worker_cfg);
-    println!(
-        "queue ready: provider={} workers={}",
-        rt.llm_provider,
-        handles.len()
-    );
 
     // NO ANALOG precedent: first long-lived mode. Ctrl-C → abort workers.
     tokio::signal::ctrl_c().await?;

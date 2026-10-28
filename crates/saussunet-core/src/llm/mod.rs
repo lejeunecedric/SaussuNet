@@ -61,6 +61,19 @@ pub fn provider_from_config(
     }
 }
 
+/// WR-03: should a daemon with this resolved config drain the job queue?
+///
+/// `provider = "mock"` (the shipped default) builds an EMPTY-script
+/// [`MockProvider`], so every claimed job would fail "mock script exhausted"
+/// and dead-letter after 4 invisible retries — indistinguishable from a real
+/// outage in the dead-letter table. The honest behavior is to NOT spawn
+/// workers in mock daemon mode: jobs stay `pending` until a real provider is
+/// configured. Tests drive workers with scripted mocks directly via
+/// `spawn_workers` — this gate lives at the daemon boot boundary only.
+pub fn daemon_drains_queue(rt: &crate::config::RuntimeConfig) -> bool {
+    rt.llm_provider != "mock"
+}
+
 /// Object-safe LLM seam (ARCHITECTURE.md Pattern 2 transposed). Implementors
 /// override [`complete`](Self::complete); the default
 /// [`generate_json`](Self::generate_json) implements the D-05/D-06 contract
@@ -183,6 +196,26 @@ mod tests {
     #[test]
     fn trait_is_dyn_compatible() {
         let _: Option<&dyn LlmProvider> = None;
+    }
+
+    #[test]
+    fn mock_daemon_does_not_drain_queue() {
+        // WR-03: the default mock provider must not drain the queue — an
+        // empty-script mock would dead-letter every job it claims.
+        let cfg: crate::config::FileConfig =
+            toml::from_str("[llm]\nprovider = \"mock\"\n").expect("parses");
+        let rt = cfg.resolve().expect("resolve");
+        assert!(!daemon_drains_queue(&rt));
+    }
+
+    #[test]
+    fn real_provider_daemon_drains_queue() {
+        let cfg: crate::config::FileConfig = toml::from_str(
+            "[llm]\nprovider = \"openai-compatible\"\napi_key = \"test-pass-9f3a\"\n",
+        )
+        .expect("parses");
+        let rt = cfg.resolve().expect("resolve");
+        assert!(daemon_drains_queue(&rt));
     }
 
     #[test]

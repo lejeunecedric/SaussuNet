@@ -148,7 +148,9 @@ name = "main"
 
 [llm]
 # Single active provider (D-02): "mock" (default — deterministic, zero secrets)
-# or "openai-compatible".
+# or "openai-compatible". NOTE: a "mock" daemon does NOT drain the job queue
+# (WR-03) — an empty-script mock would dead-letter every job — so jobs stay
+# pending until a real provider is configured here.
 provider = "mock"
 # base_url = "https://api.openai.com/v1"
 # model = "gpt-4o-mini"
