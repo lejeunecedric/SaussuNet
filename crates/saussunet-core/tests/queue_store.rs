@@ -55,6 +55,13 @@ async fn insert_jobs(store: &Store, vault_id: i64, n: usize) -> Vec<i64> {
     ids
 }
 
+/// Claim exactly one job and return it (WR-01: callers need its claim_token).
+async fn claim_one(store: &Store, vault_id: i64, now: DateTime<Utc>) -> saussunet_core::store::Job {
+    let jobs = store.claim_jobs(vault_id, 1, now).await.expect("claim");
+    assert_eq!(jobs.len(), 1, "exactly one job claimed");
+    jobs.into_iter().next().expect("job")
+}
+
 /// (status, attempts, error, claimed_at, finished_at, next_attempt_at) for `id`.
 async fn row(
     store: &Store,
@@ -186,7 +193,11 @@ async fn retry_backoff_schedule_matches_D09() {
     let err = "test-failure-9f3a";
 
     let t1 = t("2026-10-26T12:00:00Z");
-    let out = store.fail_job(id, err, t1).await.expect("fail 1");
+    let tok = claim_one(&store, vault_id, t1)
+        .await
+        .claim_token
+        .expect("token");
+    let out = store.fail_job(id, &tok, err, t1).await.expect("fail 1");
     assert_eq!(
         out,
         JobOutcome::Retrying {
@@ -201,7 +212,11 @@ async fn retry_backoff_schedule_matches_D09() {
     );
 
     let t2 = t1 + Duration::seconds(31);
-    let out = store.fail_job(id, err, t2).await.expect("fail 2");
+    let tok = claim_one(&store, vault_id, t2)
+        .await
+        .claim_token
+        .expect("token");
+    let out = store.fail_job(id, &tok, err, t2).await.expect("fail 2");
     assert_eq!(
         out,
         JobOutcome::Retrying {
@@ -216,7 +231,11 @@ async fn retry_backoff_schedule_matches_D09() {
     );
 
     let t3 = t2 + Duration::seconds(121);
-    let out = store.fail_job(id, err, t3).await.expect("fail 3");
+    let tok = claim_one(&store, vault_id, t3)
+        .await
+        .claim_token
+        .expect("token");
+    let out = store.fail_job(id, &tok, err, t3).await.expect("fail 3");
     assert_eq!(
         out,
         JobOutcome::Retrying {
@@ -231,8 +250,12 @@ async fn retry_backoff_schedule_matches_D09() {
     );
 
     let t4 = t3 + Duration::seconds(601);
+    let tok = claim_one(&store, vault_id, t4)
+        .await
+        .claim_token
+        .expect("token");
     assert_eq!(
-        store.fail_job(id, err, t4).await.expect("fail 4"),
+        store.fail_job(id, &tok, err, t4).await.expect("fail 4"),
         JobOutcome::Dead
     );
     let (status, attempts, error, _, finished_at, _) = row(&store, id).await;
@@ -253,9 +276,12 @@ async fn backoff_gates_claim() {
     let id = insert_jobs(&store, vault_id, 1).await.remove(0);
     let t0 = t("2026-10-26T12:00:00Z");
 
-    store.claim_jobs(vault_id, 1, t0).await.expect("claim");
+    let tok = claim_one(&store, vault_id, t0)
+        .await
+        .claim_token
+        .expect("token");
     store
-        .fail_job(id, "test-failure-9f3a", t0)
+        .fail_job(id, &tok, "test-failure-9f3a", t0)
         .await
         .expect("fail");
 
@@ -282,14 +308,25 @@ async fn reap_returns_expired_claims_only() {
     let t0 = t("2026-10-26T12:00:00Z");
     let expiry = Duration::minutes(5);
 
-    // A: live claim. B: done. C: dead (4 failures).
+    // A: live claim. B: done. C: dead (4 failures, each on a fresh claim —
+    // WR-01 fencing requires claim → fail per retry, gated by D-09 backoff).
     store.claim_jobs(vault_id, 1, t0).await.expect("claim A");
-    store.claim_jobs(vault_id, 1, t0).await.expect("claim B");
-    store.complete_job(ids[1], t0).await.expect("complete B");
-    store.claim_jobs(vault_id, 1, t0).await.expect("claim C");
-    for i in 0..4 {
+    let b = store.claim_jobs(vault_id, 1, t0).await.expect("claim B");
+    store
+        .complete_job(ids[1], b[0].claim_token.as_deref().unwrap(), t0)
+        .await
+        .expect("complete B");
+    let c_fail_times = [0, 31, 152, 752]; // each past the previous backoff gate
+    for secs in c_fail_times {
+        let now = t0 + Duration::seconds(secs);
+        let c = store.claim_jobs(vault_id, 1, now).await.expect("claim C");
         store
-            .fail_job(ids[2], "test-failure-9f3a", t0 + Duration::seconds(i))
+            .fail_job(
+                ids[2],
+                c[0].claim_token.as_deref().unwrap(),
+                "test-failure-9f3a",
+                now,
+            )
             .await
             .expect("fail C");
     }
@@ -326,9 +363,12 @@ async fn touch_claim_extends_lease() {
     let t0 = t("2026-10-26T12:00:00Z");
     let expiry = Duration::minutes(5);
 
-    store.claim_jobs(vault_id, 1, t0).await.expect("claim");
+    let tok = claim_one(&store, vault_id, t0)
+        .await
+        .claim_token
+        .expect("token");
     let touched = store
-        .touch_claim(id, t0 + Duration::minutes(4))
+        .touch_claim(id, &tok, t0 + Duration::minutes(4))
         .await
         .expect("touch");
     assert_eq!(touched, 1);
@@ -345,6 +385,65 @@ async fn touch_claim_extends_lease() {
     assert_eq!(row(&store, id).await.0, "claimed");
 }
 
+/// WR-01 regression: a stale claimant whose lease was reaped must not be
+/// able to clobber a live claim. Worker A claims, its lease expires and is
+/// reaped, worker B re-claims; A's late complete/fail must be rejected and
+/// B's claim must survive until B finishes it itself.
+#[tokio::test]
+async fn stale_claimant_cannot_clobber_live_claim() {
+    let (_tmp, vault_id, store) = setup().await;
+    let id = insert_jobs(&store, vault_id, 1).await.remove(0);
+    let t0 = t("2026-10-26T12:00:00Z");
+    let expiry = Duration::minutes(5);
+
+    // Worker A claims; its lease then expires and is reaped.
+    let a = store.claim_jobs(vault_id, 1, t0).await.expect("claim A");
+    store
+        .reap_expired_claims(vault_id, expiry, t0 + Duration::minutes(6))
+        .await
+        .expect("reap");
+    // Worker B claims the same job.
+    let b = store
+        .claim_jobs(vault_id, 1, t0 + Duration::minutes(7))
+        .await
+        .expect("claim B");
+    assert_eq!(b[0].id, id);
+
+    let tok_a = a[0].claim_token.clone().expect("token A");
+    let tok_b = b[0].claim_token.clone().expect("token B");
+    assert_ne!(tok_a, tok_b, "each claim mints a fresh token");
+
+    // A's late complete must NOT mark B's in-flight claim done.
+    let n = store
+        .complete_job(a[0].id, &tok_a, t("2026-10-26T12:08:00Z"))
+        .await
+        .expect("stale complete");
+    assert_eq!(n, 0, "stale claimant's complete_job must affect 0 rows");
+    assert_eq!(row(&store, id).await.0, "claimed", "B's claim survives");
+
+    // A's late fail must NOT reset B's claim or bump attempts.
+    let out = store
+        .fail_job(id, &tok_a, "stale-worker-9f3a", t("2026-10-26T12:08:00Z"))
+        .await
+        .expect("stale fail");
+    assert_eq!(out, JobOutcome::ClaimLost, "stale fail is fenced off");
+    let (status, attempts, _, claimed_at, _, _) = row(&store, id).await;
+    assert_eq!(status, "claimed", "B's claim survives stale fail");
+    assert_eq!(attempts, 0, "stale fail must not bump attempts");
+    assert_eq!(
+        claimed_at.as_deref(),
+        Some(fmt(t0 + Duration::minutes(7)).as_str())
+    );
+
+    // B completes with its own claim and it lands.
+    let n = store
+        .complete_job(b[0].id, &tok_b, t("2026-10-26T12:09:00Z"))
+        .await
+        .expect("B complete");
+    assert_eq!(n, 1);
+    assert_eq!(row(&store, id).await.0, "done");
+}
+
 /// claimed → done with finished_at; completing a pending row affects 0 rows.
 #[tokio::test]
 async fn complete_job_transitions() {
@@ -352,8 +451,14 @@ async fn complete_job_transitions() {
     let ids = insert_jobs(&store, vault_id, 2).await;
     let t0 = t("2026-10-26T12:00:00Z");
 
-    store.claim_jobs(vault_id, 1, t0).await.expect("claim");
-    let n = store.complete_job(ids[0], t0).await.expect("complete");
+    let tok = claim_one(&store, vault_id, t0)
+        .await
+        .claim_token
+        .expect("token");
+    let n = store
+        .complete_job(ids[0], &tok, t0)
+        .await
+        .expect("complete");
     assert_eq!(n, 1);
     let (status, _, _, _, finished_at, _) = row(&store, ids[0]).await;
     assert_eq!(status, "done");
@@ -361,7 +466,7 @@ async fn complete_job_transitions() {
 
     // ids[1] is still pending — completing it must be a no-op.
     let n = store
-        .complete_job(ids[1], t0)
+        .complete_job(ids[1], "not-a-real-token", t0)
         .await
         .expect("complete pending");
     assert_eq!(n, 0);

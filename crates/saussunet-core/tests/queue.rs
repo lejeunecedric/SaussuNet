@@ -340,21 +340,25 @@ async fn provider_failure_routes_through_backoff_then_dead() {
         "first retry gate must be ~now+30s (D-09), got {next:?} vs t0 {t0:?}"
     );
 
-    // Phase 2 (injected clocks): three more failures, each past its gate →
-    // 4th failure dead-letters with the error retained (D-10).
-    let outcome = store
-        .fail_job(job_id, "500", t0 + TimeDelta::seconds(31))
-        .await
-        .expect("fail 2");
+    // Phase 2 (injected clocks): three more failures, each on a fresh claim
+    // (WR-01 fencing requires claim → fail per retry) and each past its gate
+    // → the 4th failure dead-letters with the error retained (D-10).
+    let claim_fail = |store: Arc<Store>, tok_now: chrono::DateTime<Utc>, msg: &'static str| async move {
+        let c = store
+            .claim_jobs(vault_id, 1, tok_now)
+            .await
+            .expect("phase-2 claim");
+        assert_eq!(c.len(), 1, "job must be due and claimable");
+        let token = c[0].claim_token.clone().expect("claim token");
+        store
+            .fail_job(job_id, &token, "500", tok_now)
+            .await
+            .expect(msg)
+    };
+    let outcome = claim_fail(Arc::clone(&store), t0 + TimeDelta::seconds(31), "fail 2").await;
     assert!(matches!(outcome, JobOutcome::Retrying { .. }));
-    store
-        .fail_job(job_id, "500", t0 + TimeDelta::seconds(153))
-        .await
-        .expect("fail 3");
-    let outcome = store
-        .fail_job(job_id, "500", t0 + TimeDelta::seconds(601))
-        .await
-        .expect("fail 4");
+    claim_fail(Arc::clone(&store), t0 + TimeDelta::seconds(153), "fail 3").await;
+    let outcome = claim_fail(Arc::clone(&store), t0 + TimeDelta::seconds(754), "fail 4").await;
     assert_eq!(outcome, JobOutcome::Dead);
 
     let (status, attempts, error, _) = row(&store, job_id).await;

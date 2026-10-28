@@ -38,7 +38,7 @@ use chrono::Utc;
 use tokio::task::JoinHandle;
 
 use crate::llm::LlmProvider;
-use crate::store::{Job, Store};
+use crate::store::{Job, JobOutcome, Store};
 use std::sync::Arc;
 
 /// Worker-pool tuning. Durations are injectable so tests run on millisecond
@@ -140,6 +140,11 @@ async fn process_job(
     // system instructions; the provider only serde-parses the response.
     let prompt = format!("job kind: {}\ndata:\n{}", job.kind, job.payload_json);
     let schema = serde_json::json!({});
+    // WR-01 fencing: every state transition below carries the token minted
+    // by `claim_jobs`. If this worker's lease was reaped and the job was
+    // re-claimed elsewhere, its late complete/fail are rejected (0 rows /
+    // ClaimLost) and the live claim survives.
+    let claim_token = job.claim_token.clone().unwrap_or_default();
 
     // D-07: the trait method is NON-generic and returns serde_json::Value —
     // the worker needs no typed surface, so no generate_json_typed here.
@@ -147,13 +152,18 @@ async fn process_job(
     // simulation) drops both futures, so the lease goes stale with the worker.
     let outcome = tokio::select! {
         result = provider.generate_json(&prompt, &schema) => result,
-        _ = heartbeat(Arc::clone(store), job.id, cfg.heartbeat_interval) => {
+        _ = heartbeat(
+            Arc::clone(store),
+            job.id,
+            claim_token.clone(),
+            cfg.heartbeat_interval,
+        ) => {
             unreachable!("heartbeat loop never returns")
         }
     };
 
     match outcome {
-        Ok(_value) => match store.complete_job(job.id, Utc::now()).await {
+        Ok(_value) => match store.complete_job(job.id, &claim_token, Utc::now()).await {
             Ok(0) => tracing::warn!(
                 job_id = job.id,
                 "complete_job affected 0 rows — claim was lost (reaped?) mid-call"
@@ -164,7 +174,14 @@ async fn process_job(
         Err(e) => {
             // D-09/D-10 transitions (backoff ladder, dead-letter) live in fail_job.
             tracing::error!(job_id = job.id, kind = %job.kind, "provider failed: {e}");
-            match store.fail_job(job.id, &e.to_string(), Utc::now()).await {
+            match store
+                .fail_job(job.id, &claim_token, &e.to_string(), Utc::now())
+                .await
+            {
+                Ok(JobOutcome::ClaimLost) => tracing::warn!(
+                    job_id = job.id,
+                    "fail_job rejected — claim was lost (reaped?) mid-call, live claim untouched"
+                ),
                 Ok(outcome) => tracing::debug!(job_id = job.id, ?outcome, "fail_job applied"),
                 Err(fe) => tracing::error!(job_id = job.id, "fail_job failed: {fe}"),
             }
@@ -175,13 +192,21 @@ async fn process_job(
 /// D-11 heartbeat: refresh `claimed_at` every `interval` until the caller's
 /// select drops this future. `tokio::time::interval` fires immediately on the
 /// first tick — skipped, the claim already stamped `claimed_at`.
-async fn heartbeat(store: Arc<Store>, job_id: i64, interval: Duration) {
+async fn heartbeat(store: Arc<Store>, job_id: i64, claim_token: String, interval: Duration) {
     let mut tick = tokio::time::interval(interval);
     tick.tick().await; // immediate first tick — nothing to refresh yet
     loop {
         tick.tick().await;
-        if let Err(e) = store.touch_claim(job_id, Utc::now()).await {
-            tracing::error!(job_id, "heartbeat touch_claim failed: {e}");
+        match store.touch_claim(job_id, &claim_token, Utc::now()).await {
+            // WR-01: 0 rows means the fenced touch found no claim matching
+            // our token — the lease was reaped/re-claimed. Log loudly; the
+            // worker's own complete/fail will be fenced off the same way.
+            Ok(0) => tracing::warn!(
+                job_id,
+                "heartbeat touch_claim affected 0 rows — claim was lost (reaped?) mid-call"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::error!(job_id, "heartbeat touch_claim failed: {e}"),
         }
     }
 }

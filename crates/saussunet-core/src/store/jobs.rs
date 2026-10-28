@@ -29,6 +29,10 @@ pub enum JobOutcome {
     Retrying { next_attempt_at: String },
     /// Past `MAX_RETRIES`: `status='dead'`, error retained for post-mortem (D-10).
     Dead,
+    /// WR-01 fencing: the caller's `claim_token` no longer matches the row's
+    /// current claim (lease was reaped and/or re-claimed elsewhere) — the
+    /// transition was rejected, the live claim is untouched.
+    ClaimLost,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -44,6 +48,10 @@ pub struct Job {
     pub created_at: String,
     pub claimed_at: Option<String>,
     pub finished_at: Option<String>,
+    /// WR-01 fencing token: minted fresh by `claim_jobs`, cleared on reap.
+    /// `complete_job` / `fail_job` / `touch_claim` only succeed while the
+    /// caller presents the token of the CURRENT claim.
+    pub claim_token: Option<String>,
 }
 
 impl Store {
@@ -66,7 +74,7 @@ impl Store {
             match status {
                 Some(status) => sqlx::query_as::<_, Job>(
                     "SELECT id, vault_id, kind, payload_json, status, priority, attempts, error, \
-                     created_at, claimed_at, finished_at \
+                     created_at, claimed_at, finished_at, claim_token \
                      FROM jobs WHERE vault_id = ? AND status = ? \
                      ORDER BY priority DESC, created_at, id",
                 )
@@ -76,7 +84,7 @@ impl Store {
                 .await?,
                 None => sqlx::query_as::<_, Job>(
                     "SELECT id, vault_id, kind, payload_json, status, priority, attempts, error, \
-                     created_at, claimed_at, finished_at \
+                     created_at, claimed_at, finished_at, claim_token \
                      FROM jobs WHERE vault_id = ? \
                      ORDER BY priority DESC, created_at, id",
                 )
@@ -97,13 +105,14 @@ impl Store {
         let now_s = ts(now);
         let mut tx = self.pool.begin().await?;
         let rows = sqlx::query_as::<_, Job>(
-            "UPDATE jobs SET status='claimed', claimed_at=? \
+            "UPDATE jobs SET status='claimed', claimed_at=?, \
+             claim_token=lower(hex(randomblob(16))) \
              WHERE id IN (SELECT id FROM jobs \
                           WHERE status='pending' AND vault_id=? \
                             AND (next_attempt_at IS NULL OR next_attempt_at <= ?) \
                           ORDER BY priority DESC, created_at, id LIMIT ?) \
              RETURNING id, vault_id, kind, payload_json, status, priority, \
-                       attempts, error, created_at, claimed_at, finished_at",
+                       attempts, error, created_at, claimed_at, finished_at, claim_token",
         )
         .bind(&now_s)
         .bind(vault_id)
@@ -116,25 +125,44 @@ impl Store {
     }
 
     /// D-11 heartbeat: refresh `claimed_at` on a live claim so the reaper
-    /// leaves it alone. Returns rows affected (0 if the row is no longer
-    /// claimed — e.g. already reaped or completed).
-    pub async fn touch_claim(&self, job_id: i64, now: DateTime<Utc>) -> Result<u64> {
-        let res = sqlx::query("UPDATE jobs SET claimed_at=? WHERE id=? AND status='claimed'")
-            .bind(ts(now))
-            .bind(job_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(res.rows_affected())
-    }
-
-    /// Claimed → done with `finished_at`. Returns rows affected (0 if the
-    /// row is not currently claimed).
-    pub async fn complete_job(&self, job_id: i64, now: DateTime<Utc>) -> Result<u64> {
+    /// leaves it alone. WR-01: fenced on `claim_token` — a stale claimant
+    /// cannot extend someone else's live lease. Returns rows affected (0 if
+    /// the row is no longer claimed *by this caller* — e.g. reaped,
+    /// completed, or re-claimed elsewhere).
+    pub async fn touch_claim(
+        &self,
+        job_id: i64,
+        claim_token: &str,
+        now: DateTime<Utc>,
+    ) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE jobs SET status='done', finished_at=? WHERE id=? AND status='claimed'",
+            "UPDATE jobs SET claimed_at=? WHERE id=? AND status='claimed' AND claim_token=?",
         )
         .bind(ts(now))
         .bind(job_id)
+        .bind(claim_token)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Claimed → done with `finished_at`. WR-01: fenced on `claim_token` —
+    /// only the holder of the CURRENT claim may complete; a stale claimant
+    /// whose lease was reaped and re-claimed elsewhere affects 0 rows.
+    /// Returns rows affected (0 if the row is not claimed by this token).
+    pub async fn complete_job(
+        &self,
+        job_id: i64,
+        claim_token: &str,
+        now: DateTime<Utc>,
+    ) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE jobs SET status='done', finished_at=?, claim_token=NULL \
+             WHERE id=? AND status='claimed' AND claim_token=?",
+        )
+        .bind(ts(now))
+        .bind(job_id)
+        .bind(claim_token)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
@@ -143,42 +171,61 @@ impl Store {
     /// D-09/D-10: attempts++ → back to `pending` with
     /// `next_attempt_at = now + 30s / +2min / +10min` for retries 1/2/3;
     /// the 4th failure sets `status='dead'` and retains the error text.
+    /// WR-01: fenced on `claim_token` — the SELECT + UPDATE run in one
+    /// transaction and both carry the `status='claimed' AND claim_token=?`
+    /// guard, so a stale claimant cannot clobber a live claim (returns
+    /// [`JobOutcome::ClaimLost`] and touches nothing).
     pub async fn fail_job(
         &self,
         job_id: i64,
+        claim_token: &str,
         error: &str,
         now: DateTime<Utc>,
     ) -> Result<JobOutcome> {
         let now_s = ts(now);
-        let attempts: i64 = sqlx::query_scalar("SELECT attempts FROM jobs WHERE id = ?")
-            .bind(job_id)
-            .fetch_one(&self.pool)
-            .await?;
+        let mut tx = self.pool.begin().await?;
+        let attempts: Option<i64> = sqlx::query_scalar(
+            "SELECT attempts FROM jobs WHERE id=? AND status='claimed' AND claim_token=?",
+        )
+        .bind(job_id)
+        .bind(claim_token)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(attempts) = attempts else {
+            tx.commit().await?;
+            return Ok(JobOutcome::ClaimLost);
+        };
         let new_attempts = attempts + 1;
         if new_attempts > MAX_RETRIES {
             sqlx::query(
-                "UPDATE jobs SET status='dead', error=?, finished_at=?, attempts=? WHERE id = ?",
+                "UPDATE jobs SET status='dead', error=?, finished_at=?, attempts=? \
+                 WHERE id=? AND status='claimed' AND claim_token=?",
             )
             .bind(error)
             .bind(&now_s)
             .bind(new_attempts)
             .bind(job_id)
-            .execute(&self.pool)
+            .bind(claim_token)
+            .execute(&mut *tx)
             .await?;
+            tx.commit().await?;
             Ok(JobOutcome::Dead)
         } else {
             let next = now + Duration::seconds(BACKOFF_SECS[(new_attempts - 1) as usize]);
             let next_s = ts(next);
             sqlx::query(
                 "UPDATE jobs SET status='pending', error=?, attempts=?, claimed_at=NULL, \
-                 next_attempt_at=? WHERE id = ?",
+                 claim_token=NULL, next_attempt_at=? \
+                 WHERE id=? AND status='claimed' AND claim_token=?",
             )
             .bind(error)
             .bind(new_attempts)
             .bind(&next_s)
             .bind(job_id)
-            .execute(&self.pool)
+            .bind(claim_token)
+            .execute(&mut *tx)
             .await?;
+            tx.commit().await?;
             Ok(JobOutcome::Retrying {
                 next_attempt_at: next_s,
             })
@@ -197,7 +244,7 @@ impl Store {
     ) -> Result<u64> {
         let cutoff = ts(now - expiry);
         let res = sqlx::query(
-            "UPDATE jobs SET status='pending', claimed_at=NULL \
+            "UPDATE jobs SET status='pending', claimed_at=NULL, claim_token=NULL \
              WHERE status='claimed' AND vault_id=? AND claimed_at < ?",
         )
         .bind(vault_id)
