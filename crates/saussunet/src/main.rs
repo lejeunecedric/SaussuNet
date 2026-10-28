@@ -120,7 +120,7 @@ fn main() -> anyhow::Result<()> {
 async fn boot() -> anyhow::Result<()> {
     let config_path = std::path::Path::new("config.toml");
     let cfg = load_config_or_default(config_path)?;
-    let rt = cfg.resolve();
+    let rt = cfg.resolve()?;
     // Threat T-01-01: a config file living inside the vault would leak when
     // the vault is served/previewed later.
     if config_path.exists() {
@@ -159,7 +159,7 @@ async fn boot() -> anyhow::Result<()> {
 async fn write_page_cmd(rel_path: &str, from: &std::path::Path) -> anyhow::Result<()> {
     let config_path = std::path::Path::new("config.toml");
     let cfg = load_config_or_default(config_path)?;
-    let rt = cfg.resolve();
+    let rt = cfg.resolve()?;
     if config_path.exists() {
         saussunet_core::assert_outside_vault(config_path, &rt.vault_root)?;
     }
@@ -194,7 +194,7 @@ async fn write_page_cmd(rel_path: &str, from: &std::path::Path) -> anyhow::Resul
 async fn conflicts_cmd(json: bool) -> anyhow::Result<()> {
     let config_path = std::path::Path::new("config.toml");
     let cfg = load_config_or_default(config_path)?;
-    let rt = cfg.resolve();
+    let rt = cfg.resolve()?;
     if config_path.exists() {
         saussunet_core::assert_outside_vault(config_path, &rt.vault_root)?;
     }
@@ -227,7 +227,7 @@ async fn conflicts_cmd(json: bool) -> anyhow::Result<()> {
 async fn reindex_cmd() -> anyhow::Result<()> {
     let config_path = std::path::Path::new("config.toml");
     let cfg = load_config_or_default(config_path)?;
-    let rt = cfg.resolve();
+    let rt = cfg.resolve()?;
     if config_path.exists() {
         saussunet_core::assert_outside_vault(config_path, &rt.vault_root)?;
     }

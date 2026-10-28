@@ -189,7 +189,21 @@ pub struct RuntimeConfig {
 
 impl FileConfig {
     /// Resolve file values into final runtime paths (D-03, D-04).
-    pub fn resolve(&self) -> RuntimeConfig {
+    /// WR-02: `[llm]` numerics are validated here — a zero would boot a
+    /// silently broken daemon (`max_concurrency = 0` spawns zero workers,
+    /// `timeout_secs = 0` gives reqwest a zero-duration timeout), so a
+    /// clear `Config` error at resolve time is the only safe behavior.
+    pub fn resolve(&self) -> Result<RuntimeConfig> {
+        if self.llm.max_concurrency == 0 {
+            return Err(CoreError::Config(
+                "llm.max_concurrency must be >= 1 (0 would spawn zero workers)".to_string(),
+            ));
+        }
+        if self.llm.timeout_secs == 0 {
+            return Err(CoreError::Config(
+                "llm.timeout_secs must be > 0 (0 would fail every provider request)".to_string(),
+            ));
+        }
         let data_dir = PathBuf::from(&self.storage.data_dir);
         // D-03: env wins over the file value; an empty env var is ignored.
         let llm_api_key = std::env::var(ENV_LLM_API_KEY)
@@ -197,7 +211,7 @@ impl FileConfig {
             .filter(|s| !s.is_empty())
             .map(SecretString::new)
             .or_else(|| self.llm.api_key.clone());
-        RuntimeConfig {
+        Ok(RuntimeConfig {
             db_path: data_dir.join("saussunet.db"),
             vault_root: data_dir.join("vaults").join(self.vault.id.to_string()),
             bind: self.server.bind.clone(),
@@ -209,7 +223,7 @@ impl FileConfig {
             llm_api_key,
             llm_max_concurrency: self.llm.max_concurrency,
             llm_timeout_secs: self.llm.timeout_secs,
-        }
+        })
     }
 }
 
@@ -263,7 +277,7 @@ mod tests {
 
     #[test]
     fn resolved_vault_root_is_keyed_by_vault_id() {
-        let rt = FileConfig::default().resolve();
+        let rt = FileConfig::default().resolve().expect("resolve");
         assert!(
             rt.vault_root.ends_with(Path::new("vaults/1")),
             "vault_root {:?} must end with vaults/1 (D-04)",
@@ -278,7 +292,7 @@ mod tests {
     fn custom_vault_id_changes_path_not_layout() {
         let cfg: FileConfig =
             toml::from_str("[vault]\nid = 7\nname = \"research\"\n").expect("parses");
-        let rt = cfg.resolve();
+        let rt = cfg.resolve().expect("resolve");
         assert!(rt.vault_root.ends_with(Path::new("vaults/7")));
         assert_eq!(rt.vault_name, "research");
     }
@@ -325,7 +339,7 @@ mod tests {
         std::env::set_var(ENV_LLM_API_KEY, "test-env-7c21");
         let cfg: FileConfig =
             toml::from_str("[llm]\napi_key = \"test-file-4b8e\"\n").expect("parses");
-        let rt = cfg.resolve();
+        let rt = cfg.resolve().expect("resolve");
         std::env::remove_var(ENV_LLM_API_KEY);
         assert_eq!(
             rt.llm_api_key.as_ref().map(SecretString::reveal),
@@ -340,7 +354,7 @@ mod tests {
         std::env::set_var(ENV_LLM_API_KEY, "");
         let cfg: FileConfig =
             toml::from_str("[llm]\napi_key = \"test-file-4b8e\"\n").expect("parses");
-        let rt = cfg.resolve();
+        let rt = cfg.resolve().expect("resolve");
         std::env::remove_var(ENV_LLM_API_KEY);
         assert_eq!(
             rt.llm_api_key.as_ref().map(SecretString::reveal),
@@ -350,11 +364,46 @@ mod tests {
     }
 
     #[test]
+    fn zero_max_concurrency_is_rejected() {
+        // WR-02: 0 would spawn zero workers and silently stall the queue.
+        let cfg: FileConfig = toml::from_str("[llm]\nmax_concurrency = 0\n").expect("parses");
+        let err = cfg
+            .resolve()
+            .expect_err("max_concurrency = 0 must be rejected");
+        assert!(
+            err.to_string().contains("max_concurrency"),
+            "error must name the offending key: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_timeout_secs_is_rejected() {
+        // WR-02: 0 gives reqwest a zero-duration timeout — every request fails.
+        let cfg: FileConfig = toml::from_str("[llm]\ntimeout_secs = 0\n").expect("parses");
+        let err = cfg
+            .resolve()
+            .expect_err("timeout_secs = 0 must be rejected");
+        assert!(
+            err.to_string().contains("timeout_secs"),
+            "error must name the offending key: {err}"
+        );
+    }
+
+    #[test]
+    fn positive_llm_numerics_resolve() {
+        let cfg: FileConfig =
+            toml::from_str("[llm]\nmax_concurrency = 1\ntimeout_secs = 1\n").expect("parses");
+        let rt = cfg.resolve().expect("minimum valid values must resolve");
+        assert_eq!(rt.llm_max_concurrency, 1);
+        assert_eq!(rt.llm_timeout_secs, 1);
+    }
+
+    #[test]
     fn debug_output_never_leaks_api_key() {
         // D-03 proof: the raw key must be absent from any Debug rendering.
         let cfg: FileConfig =
             toml::from_str("[llm]\napi_key = \"test-pass-9f3a\"\n").expect("parses");
-        let rt = cfg.resolve();
+        let rt = cfg.resolve().expect("resolve");
         let rendered = format!("{rt:?}");
         assert!(
             !rendered.contains("test-pass-9f3a"),

@@ -18,7 +18,7 @@ fn rt_for(data_dir: &Path) -> RuntimeConfig {
         data_dir.display()
     );
     let cfg: FileConfig = toml::from_str(&toml).expect("test config parses");
-    cfg.resolve()
+    cfg.resolve().expect("resolve")
 }
 
 fn page(title: &str, overview: &str) -> String {
