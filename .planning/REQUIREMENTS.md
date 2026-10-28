@@ -25,14 +25,14 @@ Requirements for initial release (lean v1). Each maps to roadmap phases.
 
 ### LLM Provider
 
-- [ ] **LLMP-01**: User can configure an LLM provider via an abstract `LlmProvider` interface: any OpenAI-compatible endpoint (covers Ollama/llama.cpp local on Strix Halo and cloud APIs)
-- [ ] **LLMP-02**: Extraction workers run in a bounded pool sized to LLM capacity; a deterministic mock provider makes the whole pipeline testable without a real LLM
+- [x] **LLMP-01**: User can configure an LLM provider via an abstract `LlmProvider` interface: any OpenAI-compatible endpoint (covers Ollama/llama.cpp local on Strix Halo and cloud APIs)
+- [x] **LLMP-02**: Extraction workers run in a bounded pool sized to LLM capacity; a deterministic mock provider makes the whole pipeline testable without a real LLM
 
 ### Source Watching
 
 - [ ] **SRCC-01**: User can configure a WebDAV folder as a watched source; the system polls it on an interval, detects new/changed/removed files (etag/size), and enqueues ingestion jobs (Depth:1 walk with depth cap, never Depth: infinity)
 - [ ] **SRCC-02**: Watcher state (etags, pageTokens, last-check) persists in SQLite and survives restarts; enqueue is sha256-gated so re-polls of unchanged files are no-ops
-- [ ] **SRCC-03**: Ingestion jobs are durable (SQLite queue with atomic claim, retry states, claimed-at expiry) — a crash mid-batch resumes without loss or duplication
+- [x] **SRCC-03**: Ingestion jobs are durable (SQLite queue with atomic claim, retry states, claimed-at expiry) — a crash mid-batch resumes without loss or duplication
 
 ### Health Lint
 
@@ -109,9 +109,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | VLET-04 | Phase 1 | Complete |
 | INFR-01 | Phase 1 | Complete |
 | INFR-02 | Phase 1 | Complete |
-| LLMP-01 | Phase 2 | Pending |
-| LLMP-02 | Phase 2 | Pending |
-| SRCC-03 | Phase 2 | Pending |
+| LLMP-01 | Phase 2 | Complete |
+| LLMP-02 | Phase 2 | Complete |
+| SRCC-03 | Phase 2 | Complete |
 | PIPE-01 | Phase 3 | Pending |
 | PIPE-02 | Phase 3 | Pending |
 | PIPE-03 | Phase 3 | Pending |

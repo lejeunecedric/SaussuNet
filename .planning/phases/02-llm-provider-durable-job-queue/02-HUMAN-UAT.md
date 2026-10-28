@@ -1,9 +1,9 @@
 ---
-status: partial
+status: resolved
 phase: 02-llm-provider-durable-job-queue
 source: [02-VERIFICATION.md]
 started: 2026-10-26T08:37:33Z
-updated: 2026-10-26T08:37:33Z
+updated: 2026-10-26T09:52:00Z
 ---
 
 # Phase 02 — Human Verification
@@ -25,14 +25,14 @@ SAUSSUNET_LLM__BASE_URL=<endpoint> SAUSSUNET_LLM__MODEL=<model> SAUSSUNET_LLM__A
   cargo test -p saussunet-core --test llm_live -- --ignored
 ```
 
-result: [pending]
+result: pass — 2026-10-26, run against local Halogen endpoint (`http://127.0.0.1:8731/v1`, model `halogen-qwen3.8-flash-next`): `live_endpoint_returns_valid_json ... ok` (1 passed, 0.73s). Bearer auth, chat/completions wiring, and tolerant parse all proven against a live endpoint.
 
 ## Summary
 
 total: 1
-passed: 0
+passed: 1
 issues: 0
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 

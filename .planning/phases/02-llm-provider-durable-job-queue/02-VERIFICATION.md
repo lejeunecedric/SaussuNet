@@ -1,8 +1,8 @@
 ---
 phase: 02-llm-provider-durable-job-queue
 verified: 2026-10-26T08:36:20Z
-status: human_needed
-score: "25/26 must-haves verified"
+status: passed
+score: "26/26 must-haves verified"
 behavioral_verification:
   test_suite: "cargo test -p saussunet-core → 121 passed, 0 failed, 1 ignored (matches expected)"
 requirements_coverage:
@@ -14,7 +14,7 @@ decision_coverage:
   total: 14
   not_honored: []
 human_verification:
-  - "Live end-to-end validation against a real OpenAI-compatible endpoint (D-01, SC1 live half) — env-gated #[ignore] test, skipped for lack of credentials in this environment"
+  - "RESOLVED 2026-10-26: live end-to-end validation against a real OpenAI-compatible endpoint (D-01, SC1 live half) — run against local Halogen endpoint (http://127.0.0.1:8731/v1, model halogen-qwen3.8-flash-next): live_endpoint_returns_valid_json PASSED (1 passed, 0.73s). See 02-HUMAN-UAT.md"
 gaps: []
 deferred: []
 ---
@@ -23,7 +23,7 @@ deferred: []
 
 **Goal (ROADMAP):** Jobs flow through a crash-safe queue to extraction workers backed by a swappable LLM provider — fully testable with a deterministic mock before any real model is configured.
 
-**Overall status: `human_needed`** — every automated check passes (25/26 truths, all artifacts wired, 121/121 tests green, all 14 CONTEXT decisions honored). The single non-verified truth is the *live* half of SC1: a job completing against a real OpenAI-compatible endpoint. The code path exists and is structurally proven; execution requires credentials this environment does not have (known pending item, per 02-05-SUMMARY.md).
+**Overall status: `passed`** — every automated check passes (26/26 truths, all artifacts wired, 121/121 tests green, all 14 CONTEXT decisions honored). The *live* half of SC1 was resolved 2026-10-26: the env-gated live test ran against the local Halogen OpenAI-compatible endpoint and passed (see human_verification above and 02-HUMAN-UAT.md).
 
 ## Success Criteria (ROADMAP)
 
