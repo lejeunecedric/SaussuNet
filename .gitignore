@@ -37,3 +37,6 @@ config.local.toml
 # Divers
 .DS_Store
 *.log
+
+# Runtime config — may hold api_key; NEVER tracked (T-02). Template: config.example.toml
+config.toml

@@ -127,8 +127,9 @@ pub fn version() -> &'static str {
 }
 
 /// Example `config.toml` shipped by `saussunet init` (MoriNet
-/// `lib.rs::default_config()` idiom). A unit test asserts the committed root
-/// `config.toml` is byte-identical to this string.
+/// `lib.rs::default_config()` idiom). A unit test asserts the committed
+/// `config.example.toml` template is byte-identical to this string. The
+/// runtime `config.toml` is gitignored (T-02) — it may hold a real api_key.
 pub fn default_config() -> &'static str {
     r#"# SaussuNet configuration (template written by `saussunet init`).
 
@@ -175,12 +176,12 @@ mod tests {
     }
 
     #[test]
-    fn committed_root_config_matches_default_config() {
+    fn committed_example_config_matches_default_config() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|p| p.parent())
             .expect("crate lives under <root>/crates/<name>")
-            .join("config.toml");
+            .join("config.example.toml");
         let committed = std::fs::read_to_string(&root)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", root.display()));
         assert_eq!(committed, default_config());
