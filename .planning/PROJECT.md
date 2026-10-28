@@ -17,6 +17,7 @@ Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-d
 <!-- Shipped and confirmed valuable. -->
 
 - [x] Rust workspace: `saussunet-core` (lib) + standalone web binary; MoriNet can depend on the lib later — Validated in Phase 1 (zero-axum core enforced by CI guard, sqlx 0.8 pinned for MoriNet interop)
+- [x] Abstract LLM provider: local (Strix Halo / ROCm) or cloud API, interchangeable — Validated in Phase 2 (`LlmProvider` trait + `MockProvider` + `OpenAiCompat`, live-proven against a real OpenAI-compatible endpoint; durable SQLite job queue with atomic claim/retry/reap)
 
 ### Active
 
@@ -27,7 +28,6 @@ Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-d
 - [ ] Inbound MCP sources: the vault stores only **pointer notes** (access-point address), content read live via stream on demand
 - [ ] Outbound MCP exposure: the vault served over MCP for external agent reading
 - [ ] Optional ontology (YAML, OWL, RDF, schema): object classes, their display, and relations — otherwise default llm-wiki ontology
-- [ ] Abstract LLM provider: local (Strix Halo / ROCm) or cloud API, interchangeable
 - [ ] Web UI: source + ontology config, pipeline monitoring (ingestion, errors), review/editing of generated notes
 - [ ] mdbook preview of the vault, configured like in MoriNet
 - [ ] Deployment to our server (MoriNet pattern: deploy script + systemd/nginx), with server config kept in a **gitignored** file — never in the repo
@@ -92,4 +92,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-25 — translated to English per user request*
+*Last updated: 2026-10-26 — Phase 2 (LLM Provider + Durable Job Queue) complete: 121 tests green, live endpoint validated*
