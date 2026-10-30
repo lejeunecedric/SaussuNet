@@ -63,12 +63,22 @@ pub trait Fetcher: Send + Sync {
 /// Production fetcher: SSRF guard → guarded reqwest fetch.
 pub struct HttpFetcher {
     client: reqwest::Client,
+    max_fetch_bytes: u64,
 }
 
 impl HttpFetcher {
     pub fn new() -> Result<Self> {
         Ok(Self {
             client: fetch::default_client()?,
+            max_fetch_bytes: fetch::DEFAULT_MAX_FETCH_BYTES,
+        })
+    }
+
+    /// Fetcher honouring `RuntimeConfig.pipeline_max_fetch_bytes`.
+    pub fn with_max_fetch_bytes(max_fetch_bytes: u64) -> Result<Self> {
+        Ok(Self {
+            max_fetch_bytes,
+            ..Self::new()?
         })
     }
 }
@@ -77,7 +87,7 @@ impl HttpFetcher {
 impl Fetcher for HttpFetcher {
     async fn fetch(&self, url: &str) -> Result<fetch::FetchResult> {
         let guarded = fetch::assert_public_http_url(url).await?;
-        fetch::fetch_url(&self.client, &guarded).await
+        fetch::fetch_url(&self.client, &guarded, self.max_fetch_bytes).await
     }
 }
 

@@ -27,6 +27,11 @@ const MAX_REDIRECTS: u8 = 5;
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Clean, identifiable User-Agent (no tool fingerprint soup).
 const USER_AGENT: &str = "SaussuNet/0.1 (+local ingestion daemon)";
+/// Default body size cap for guarded fetches. Mirrors
+/// `config::default_max_fetch_bytes` (5 MiB); the queue handler swaps in
+/// `RuntimeConfig.pipeline_max_fetch_bytes` once its signature carries config
+/// (same documented seam as DEFAULT_MIN_SOURCES).
+pub const DEFAULT_MAX_FETCH_BYTES: u64 = 5_242_880;
 
 /// Result of a successful guarded fetch: article Markdown + provenance.
 #[derive(Debug, Clone)]
@@ -166,8 +171,23 @@ pub fn default_client() -> Result<reqwest::Client> {
 /// Fetch `url` (already guarded by the caller or re-guarded here), following
 /// up to [`MAX_REDIRECTS`] redirects MANUALLY with the SSRF guard re-applied
 /// to every hop. Body → article Markdown via [`extract::html_to_markdown`].
-pub async fn fetch_url(client: &reqwest::Client, url: &Url) -> Result<FetchResult> {
-    let mut current = assert_public_http_url(url.as_str()).await?;
+/// The body is read with a running cap of `max_bytes`: a declared
+/// Content-Length over the cap is refused before reading, and a lying or
+/// absent Content-Length is caught chunk-by-chunk (OOM guard, review 03 MEDIUM).
+pub async fn fetch_url(client: &reqwest::Client, url: &Url, max_bytes: u64) -> Result<FetchResult> {
+    let guarded = assert_public_http_url(url.as_str()).await?;
+    fetch_url_unguarded(client, &guarded, max_bytes).await
+}
+
+/// Redirect loop + capped body read WITHOUT the entry guard (each redirect
+/// hop is still re-guarded). `pub(crate)` so unit tests can exercise the size
+/// cap against loopback fixture servers the public guard would refuse.
+pub(crate) async fn fetch_url_unguarded(
+    client: &reqwest::Client,
+    current: &Url,
+    max_bytes: u64,
+) -> Result<FetchResult> {
+    let mut current = current.clone();
     for _hop in 0..=MAX_REDIRECTS {
         let resp = client
             .get(current.clone())
@@ -204,10 +224,7 @@ pub async fn fetch_url(client: &reqwest::Client, url: &Url) -> Result<FetchResul
                 reason: format!("HTTP {status}"),
             });
         }
-        let html = resp.text().await.map_err(|e| CoreError::Fetch {
-            url: current.to_string(),
-            reason: format!("body read failed: {e}"),
-        })?;
+        let html = read_capped_body(resp, &current, max_bytes).await?;
         let (title, markdown) = extract::html_to_markdown(&html)?;
         return Ok(FetchResult {
             final_url: current.to_string(),
@@ -217,8 +234,48 @@ pub async fn fetch_url(client: &reqwest::Client, url: &Url) -> Result<FetchResul
         });
     }
     Err(CoreError::Fetch {
-        url: sanitize_for_error(url.as_str()),
+        url: sanitize_for_error(current.as_str()),
         reason: format!("more than {MAX_REDIRECTS} redirects"),
+    })
+}
+
+/// Read the response body with a running size cap. Refuses an over-cap
+/// declared Content-Length up front, then accumulates chunks and aborts as
+/// soon as the running total exceeds `max_bytes` — a lying or absent
+/// Content-Length cannot stream an unbounded body into memory.
+async fn read_capped_body(resp: reqwest::Response, url: &Url, max_bytes: u64) -> Result<String> {
+    use futures_util::StreamExt;
+
+    if let Some(len) = resp.content_length() {
+        if len > max_bytes {
+            return Err(CoreError::Fetch {
+                url: sanitize_for_error(url.as_str()),
+                reason: format!(
+                    "declared body size {len} bytes exceeds the {max_bytes}-byte fetch cap"
+                ),
+            });
+        }
+    }
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| CoreError::Fetch {
+            url: sanitize_for_error(url.as_str()),
+            reason: format!("body read failed: {e}"),
+        })?;
+        if buf.len() as u64 + chunk.len() as u64 > max_bytes {
+            return Err(CoreError::Fetch {
+                url: sanitize_for_error(url.as_str()),
+                reason: format!("body exceeds the {max_bytes}-byte fetch cap"),
+            });
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    // Strict UTF-8 (matches the old reqwest text() behavior): a lossy decode
+    // would silently corrupt the sha256 provenance of the extracted markdown.
+    String::from_utf8(buf).map_err(|e| CoreError::Fetch {
+        url: sanitize_for_error(url.as_str()),
+        reason: format!("body is not valid UTF-8: {e}"),
     })
 }
 
@@ -296,5 +353,76 @@ mod tests {
             .await
             .expect("example.com must pass the guard");
         assert_eq!(ok.scheme(), "https");
+    }
+
+    // ---- max_fetch_bytes enforcement (03-08 review MEDIUM) ----------------
+    //
+    // fetch_url's SSRF guard blocks loopback, so these tests call the
+    // internal unguarded core directly — the guard is covered above.
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Serve one canned HTTP response on an ephemeral loopback port, return it.
+    async fn serve_once(response: &'static [u8]) -> Url {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await; // drain request line
+            let _ = sock.write_all(response).await;
+            let _ = sock.shutdown().await;
+        });
+        Url::parse(&format!("http://{addr}/page")).unwrap()
+    }
+
+    const SMALL_HTML: &str = "<html><body><p>tiny</p></body></html>";
+
+    #[tokio::test]
+    async fn fetch_rejects_declared_content_length_over_cap() {
+        let body = "x".repeat(5_000);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/html\r\n\r\n{body}",
+            body.len()
+        );
+        let url = serve_once(resp.into_bytes().leak()).await;
+        let err = fetch_url_unguarded(&default_client().unwrap(), &url, 1_000)
+            .await
+            .expect_err("declared 5000 bytes over a 1000 cap must fail");
+        assert!(
+            matches!(&err, CoreError::Fetch { reason, .. } if reason.contains("exceeds")),
+            "expected size-cap Fetch error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_body_over_cap_without_content_length() {
+        // No Content-Length (connection-close framing): 5000 bytes stream in
+        // and only the running cap can stop them.
+        let body = "x".repeat(5_000);
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n{body}");
+        let url = serve_once(resp.into_bytes().leak()).await;
+        let err = fetch_url_unguarded(&default_client().unwrap(), &url, 1_000)
+            .await
+            .expect_err("lying Content-Length must not bypass the running cap");
+        assert!(
+            matches!(&err, CoreError::Fetch { reason, .. } if reason.contains("exceeds")),
+            "expected size-cap Fetch error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_accepts_body_under_cap() {
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/html\r\n\r\n{SMALL_HTML}",
+            SMALL_HTML.len()
+        );
+        let url = serve_once(resp.into_bytes().leak()).await;
+        let got = fetch_url_unguarded(&default_client().unwrap(), &url, 1_000)
+            .await
+            .expect("small body must pass");
+        assert!(!got.markdown.is_empty());
+        assert_eq!(got.sha256.len(), 64);
     }
 }

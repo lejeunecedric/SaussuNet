@@ -23,6 +23,7 @@ chrono = { workspace = true }
 pulldown-cmark = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
+futures-util = { workspace = true }
 async-trait = { workspace = true }
 url = { workspace = true }
 readability = { workspace = true }

@@ -22,7 +22,9 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 # rationale as the sqlx pin above (QUAL-05: saussunet-core embedded in MoriNet).
 # An outbound client is allowed in core; the axum/server ban (Anti-Pattern 1)
 # is unaffected — scripts/check.sh greps only for 'axum'.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# StreamExt over reqwest's bytes_stream (running-cap body reads, fetch.rs size guard).
+futures-util = "0.3"
 # async fn in traits is not dyn-compatible (RPITIT, E0038) on edition 2021;
 # async-trait keeps the LlmProvider trait dyn-safe for Arc<dyn LlmProvider>.
 async-trait = "0.1"
