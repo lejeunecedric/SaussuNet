@@ -392,3 +392,70 @@ async fn hallucinated_link_page_never_reaches_disk_and_is_recorded() {
 fn provider_arc(p: &Arc<MockProvider>) -> Arc<dyn LlmProvider> {
     Arc::clone(p) as Arc<dyn LlmProvider>
 }
+
+/// UAT-03 live finding: small models routinely ignore the "≥2 [[wikilinks]]"
+/// instruction, so every page died at the validator (`requires at least 2
+/// outbound [[wikilinks]]`). The pipeline now appends a deterministic Related
+/// floor from the entity registry so a compliant page still ships.
+#[tokio::test]
+async fn wikilink_floor_rescues_page_without_links() {
+    let (_tmp, vault_id, store, vault) = setup().await;
+    // Registry neighbours the floor can link (whitelist = index ∪ registry).
+    store
+        .upsert_entity(
+            vault_id,
+            "Serde",
+            "[]",
+            Some("entities/serde.md"),
+            Some("entity"),
+        )
+        .await
+        .unwrap();
+    store
+        .upsert_entity(
+            vault_id,
+            "Cargo",
+            "[]",
+            Some("entities/cargo.md"),
+            Some("entity"),
+        )
+        .await
+        .unwrap();
+
+    let pass1 = json!({
+        "candidates": [
+            {"name": "Rust", "kind": "entity", "mentions": 9, "central": true,
+             "justification": "the source is about Rust", "aliases": []}
+        ]
+    });
+    // Pass-2 output with ZERO wikilinks — the exact live failure shape.
+    let bare = json!({
+        "title": "Rust",
+        "page_type": "entity",
+        "tags": ["technology"],
+        "summary": format!("Rust is a systems language. ^[{}]", raw_rel()),
+        "sections": [{
+            "heading": "Overview",
+            "markdown": format!("Rust emphasizes safety. ^[{}]", raw_rel())
+        }],
+        "contested": false,
+        "contradictions": []
+    });
+    let provider = Arc::new(MockProvider::new(vec![
+        Scripted::Ok(pass1),
+        Scripted::Ok(bare),
+    ]));
+    let url = "https://example.com/wikilink-floor";
+    run_ingest(&store, &vault, &provider_arc(&provider), url, url).await;
+
+    let content = read_page(&vault, "entities/rust.md");
+    let (_yaml, body) = frontmatter::split(&content);
+    assert!(
+        frontmatter::count_outbound_wikilinks(body) >= 2,
+        "floor must lift the page to the 2-link validator floor: {body}"
+    );
+    assert!(
+        body.contains("## Related"),
+        "floor is a Related section: {body}"
+    );
+}

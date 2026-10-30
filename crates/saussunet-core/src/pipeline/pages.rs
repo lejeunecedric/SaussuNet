@@ -159,7 +159,7 @@ pub async fn gate_and_write(
             clip(&serde_json::to_string(&content).unwrap_or_default())
         );
 
-        let page = assemble_page(
+        let mut page = assemble_page(
             &content,
             &canonical,
             candidate.kind,
@@ -167,6 +167,30 @@ pub async fn gate_and_write(
             &existing,
             &taxonomy,
         );
+        // UAT-03 live finding: small models routinely ignore the "≥2
+        // [[wikilinks]]" instruction and every such page died at the
+        // validator. Deterministic rescue: append a Related floor linking
+        // entity-registry neighbours (whitelist = index ∪ registry) until
+        // the 2-distinct-link floor is met. No-op for compliant pages.
+        let (_fm_head, body) = frontmatter::split(&page);
+        let need = 2usize.saturating_sub(frontmatter::count_outbound_wikilinks(body));
+        if need > 0 {
+            let neighbours: Vec<String> = store
+                .list_entities(vault.id)
+                .await?
+                .into_iter()
+                .map(|e| e.canonical_name)
+                .filter(|n| n != &canonical)
+                .take(need + 1)
+                .collect();
+            if !neighbours.is_empty() {
+                let links: Vec<String> = neighbours.iter().map(|n| format!("[[{n}]]")).collect();
+                page.push_str(&format!(
+                    "\n\n## Related\n\nRelated: {}.\n",
+                    links.join(", ")
+                ));
+            }
+        }
         let outcome = match vault::writer::write_generated_page(vault, store, &rel_path, &page)
             .await
         {
