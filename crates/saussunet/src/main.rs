@@ -131,6 +131,7 @@ async fn boot() -> anyhow::Result<()> {
 
     // Daemon wiring: single active provider (D-02) + bounded pool (D-04).
     let store = std::sync::Arc::new(store);
+    let vault = std::sync::Arc::new(vault);
     let provider = saussunet_core::llm::provider_from_config(&rt)?;
     // WR-03: the default "mock" provider has an empty script — draining the
     // queue with it would fail and dead-letter every job invisibly. Skip
@@ -141,7 +142,7 @@ async fn boot() -> anyhow::Result<()> {
             ..Default::default()
         };
         let handles =
-            saussunet_core::queue::spawn_workers(store, provider, rt.vault_id, worker_cfg);
+            saussunet_core::queue::spawn_workers(store, provider, vault, rt.vault_id, worker_cfg);
         println!(
             "queue ready: provider={} workers={}",
             rt.llm_provider,

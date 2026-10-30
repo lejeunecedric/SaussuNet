@@ -26,11 +26,14 @@
 //! the worker task drops the select and stops the heartbeat, exactly like a
 //! dead process.
 //!
-//! Threat model (02-04): `payload_json` is untrusted data — it is placed in
-//! the user-message body of the prompt, never in system instructions, and the
-//! provider only serde-parses the response. No shell, no eval, no path is
-//! derived from payload here. Logs carry job id/kind/error strings only;
-//! `CoreError::Llm` Display carries status+url, never key material (D-03).
+//! Threat model (02-04, updated 03-01): `payload_json` is untrusted data.
+//! Since 03-01 it also drives a URL fetch via `pipeline::handle_job` — the
+//! SSRF guard (`pipeline::fetch::assert_public_http_url`, scheme allowlist +
+//! private-range rejection, re-checked on every redirect hop) is the
+//! mitigation, and no path is derived from the payload without sanitisation
+//! (`vault::raw::write_raw` refuses traversal). Logs carry job id/kind/error
+//! strings only; `CoreError::Llm`/`Fetch`/`BlockedUrl` Display never carries
+//! userinfo or key material (D-03).
 
 use std::time::Duration;
 
@@ -38,7 +41,9 @@ use chrono::Utc;
 use tokio::task::JoinHandle;
 
 use crate::llm::LlmProvider;
+use crate::pipeline;
 use crate::store::{Job, JobOutcome, Store};
+use crate::vault::Vault;
 use std::sync::Arc;
 
 /// Worker-pool tuning. Durations are injectable so tests run on millisecond
@@ -68,11 +73,13 @@ impl Default for WorkerConfig {
 }
 
 /// Spawn exactly `cfg.max_concurrency` worker loops against `store`,
-/// executing claimed jobs through `provider` for vault `vault_id`. Returns
+/// executing claimed jobs through the pipeline dispatch for vault `vault_id`
+/// (`provider` serves the LLM passes inside `pipeline::handle_job`). Returns
 /// the join handles for shutdown (plan 02-05 wires the daemon).
 pub fn spawn_workers(
     store: Arc<Store>,
     provider: Arc<dyn LlmProvider>,
+    vault: Arc<Vault>,
     vault_id: i64,
     cfg: WorkerConfig,
 ) -> Vec<JoinHandle<()>> {
@@ -80,10 +87,11 @@ pub fn spawn_workers(
         .map(|i| {
             let store = Arc::clone(&store);
             let provider = Arc::clone(&provider);
+            let vault = Arc::clone(&vault);
             let cfg = cfg.clone();
             tokio::spawn(async move {
                 tracing::info!(worker = i, vault_id, "queue worker started");
-                worker_loop(store, provider, vault_id, cfg).await;
+                worker_loop(store, provider, vault, vault_id, cfg).await;
             })
         })
         .collect()
@@ -96,6 +104,7 @@ pub fn spawn_workers(
 async fn worker_loop(
     store: Arc<Store>,
     provider: Arc<dyn LlmProvider>,
+    vault: Arc<Vault>,
     vault_id: i64,
     cfg: WorkerConfig,
 ) {
@@ -125,33 +134,31 @@ async fn worker_loop(
             continue;
         };
 
-        process_job(&store, &provider, &cfg, job).await;
+        process_job(&store, &provider, &vault, &cfg, job).await;
     }
 }
 
-/// Run one claimed job: heartbeat ‖ provider call, then complete/fail.
+/// Run one claimed job: heartbeat ‖ pipeline handler, then complete/fail.
 async fn process_job(
     store: &Arc<Store>,
     provider: &Arc<dyn LlmProvider>,
+    vault: &Arc<Vault>,
     cfg: &WorkerConfig,
     job: Job,
 ) {
-    // Threat model: payload is untrusted DATA in the user-message body, never
-    // system instructions; the provider only serde-parses the response.
-    let prompt = format!("job kind: {}\ndata:\n{}", job.kind, job.payload_json);
-    let schema = serde_json::json!({});
     // WR-01 fencing: every state transition below carries the token minted
     // by `claim_jobs`. If this worker's lease was reaped and the job was
     // re-claimed elsewhere, its late complete/fail are rejected (0 rows /
     // ClaimLost) and the live claim survives.
     let claim_token = job.claim_token.clone().unwrap_or_default();
 
-    // D-07: the trait method is NON-generic and returns serde_json::Value —
-    // the worker needs no typed surface, so no generate_json_typed here.
-    // The heartbeat branch never returns; aborting this task (kill -9
-    // simulation) drops both futures, so the lease goes stale with the worker.
+    // 03-01: kind dispatch replaces the generic provider prompt — the whole
+    // source flow (fetch → extract → raw write → LLM passes) runs inside
+    // `pipeline::handle_job` (D-02). The heartbeat branch never returns;
+    // aborting this task (kill -9 simulation) drops both futures, so the
+    // lease goes stale with the worker (D-11).
     let outcome = tokio::select! {
-        result = provider.generate_json(&prompt, &schema) => result,
+        result = pipeline::handle_job(store, vault, provider, &job, &claim_token) => result,
         _ = heartbeat(
             Arc::clone(store),
             job.id,
@@ -173,7 +180,7 @@ async fn process_job(
         },
         Err(e) => {
             // D-09/D-10 transitions (backoff ladder, dead-letter) live in fail_job.
-            tracing::error!(job_id = job.id, kind = %job.kind, "provider failed: {e}");
+            tracing::error!(job_id = job.id, kind = %job.kind, "job handler failed: {e}");
             match store
                 .fail_job(job.id, &claim_token, &e.to_string(), Utc::now())
                 .await

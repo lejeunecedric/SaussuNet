@@ -1,20 +1,34 @@
-//! Worker-pool integration tests (plan 02-04): the thin end-to-end slice
-//! (insert → claim → provider → done), the D-04 bounded pool, the D-11
-//! heartbeat/reap lease semantics, and the SC3 kill-9 crash-resume proof —
-//! all driven by the deterministic MockProvider with injectable millisecond
-//! WorkerConfig durations (zero real 30s/5min waits, zero API keys, D-14).
+//! Worker-pool integration tests (plan 02-04, adapted by 03-01): the thin
+//! end-to-end slice (insert → claim → handler → done), the D-04 bounded pool,
+//! the D-11 heartbeat/reap lease semantics, and the SC3 kill-9 crash-resume
+//! proof — all driven with injectable millisecond WorkerConfig durations
+//! (zero real 30s/5min waits, zero API keys, D-14).
+//!
+//! 03-01 replaced the generic provider prompt with kind dispatch
+//! (`pipeline::handle_job`), so the slow/hang/delay behaviours that Phase 2
+//! scripted into the MockProvider now live behind the test-only fetcher seam
+//! (`pipeline::set_fetcher_override`): jobs use kind `ingest_url` and the
+//! stub fetcher keys its behaviour off the payload URL. The provider stays
+//! an empty MockProvider — the v1 ingest handler never calls it.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::{NaiveDateTime, TimeDelta, Utc};
 use tempfile::TempDir;
 
 use saussunet_core::config::{FileConfig, RuntimeConfig};
-use saussunet_core::llm::{MockProvider, Scripted};
+use saussunet_core::error::{CoreError, Result as CoreResult};
+use saussunet_core::llm::MockProvider;
+use saussunet_core::pipeline::fetch::FetchResult;
+use saussunet_core::pipeline::{self, Fetcher};
 use saussunet_core::queue::{spawn_workers, WorkerConfig};
 use saussunet_core::store::JobOutcome;
+use saussunet_core::vault::Vault;
 use saussunet_core::{boot_open, Store};
 
 /// Same file-backed fixture as tests/writer.rs / tests/queue_store.rs
@@ -28,11 +42,12 @@ fn rt_for(data_dir: &Path, name: &str) -> RuntimeConfig {
     cfg.resolve().expect("resolve")
 }
 
-async fn setup() -> (TempDir, i64, Arc<Store>) {
+async fn setup() -> (TempDir, i64, Arc<Store>, Arc<Vault>) {
+    pipeline::set_fetcher_override(Arc::new(StubFetcher));
     let tmp = TempDir::new().expect("tempdir");
     let rt = rt_for(tmp.path(), "main");
     let (store, vault) = boot_open(&rt).await.expect("boot");
-    (tmp, vault.id, Arc::new(store))
+    (tmp, vault.id, Arc::new(store), Arc::new(vault))
 }
 
 /// Millisecond-scale config: poll 10ms, heartbeat 50ms, claim expiry 300ms.
@@ -59,17 +74,6 @@ async fn wait_for_status(store: &Store, vault_id: i64, job_ids: &[i64], status: 
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("timeout: jobs {job_ids:?} never reached status '{status}'");
-}
-
-/// Bounded wait for the mock to have served at least `n` calls.
-async fn wait_call_count(mock: &MockProvider, n: usize) {
-    for _ in 0..500 {
-        if mock.call_count() >= n {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    panic!("timeout: mock call_count never reached {n}");
 }
 
 /// (status, attempts, error, finished_at) for `id`.
@@ -105,43 +109,121 @@ fn parse_ts(s: &str) -> chrono::DateTime<Utc> {
         .and_utc()
 }
 
-/// The thin end-to-end slice: insert → claim → provider.generate_json → done.
+// --- test-only fetcher seam ------------------------------------------------
+//
+// Behaviour is keyed off the URL so one process-global stub serves every
+// test in this binary without cross-test interference:
+//   https://stub.test/ok-<uid>          instant success
+//   https://stub.test/slow-<uid>        50 ms in flight (pool-bound gauge)
+//   https://stub.test/hangfirst-<uid>   FIRST call per URL hangs 10 s, rest ok
+//   https://stub.test/hangfail-<uid>    FIRST call per URL sleeps 500 ms, fails
+fn payload(url: &str) -> String {
+    format!("{{\"url\": \"{url}\", \"source_id\": \"{url}\"}}")
+}
+
+fn url_count(url: &str) -> usize {
+    CALLS.lock().unwrap().get(url).copied().unwrap_or(0)
+}
+
+async fn wait_url_calls(url: &str, n: usize) {
+    for _ in 0..500 {
+        if url_count(url) >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("timeout: fetch calls for {url} never reached {n}");
+}
+
+static CALLS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static SLOW_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+static SLOW_MAX_INFLIGHT: AtomicUsize = AtomicUsize::new(0);
+static HANG_FIRST_SEEN: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+struct StubFetcher;
+
+#[async_trait]
+impl Fetcher for StubFetcher {
+    async fn fetch(&self, url: &str) -> CoreResult<FetchResult> {
+        *CALLS.lock().unwrap().entry(url.to_string()).or_insert(0) += 1;
+        let mode = url
+            .trim_start_matches("https://stub.test/")
+            .split('-')
+            .next()
+            .unwrap_or("ok")
+            .to_string();
+        if mode == "slow" {
+            let now = SLOW_INFLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+            SLOW_MAX_INFLIGHT.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            SLOW_INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+        } else if mode == "hangfirst" || mode == "hangfail" {
+            let seen = HANG_FIRST_SEEN.get_or_init(|| Mutex::new(HashMap::new()));
+            let first = {
+                let mut g = seen.lock().unwrap();
+                *g.entry(url.to_string()).or_insert(0) += 1;
+                g[url] == 1
+            };
+            if first {
+                if mode == "hangfail" {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    return Err(CoreError::Fetch {
+                        url: url.to_string(),
+                        reason: "stub scripted failure".to_string(),
+                    });
+                }
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        }
+        Ok(FetchResult {
+            final_url: url.to_string(),
+            markdown: format!("body of {url}"),
+            sha256: "stub-sha".to_string(),
+            title: String::new(),
+        })
+    }
+}
+
+/// The thin end-to-end slice: insert → claim → pipeline handler → done.
 #[tokio::test]
 async fn job_flows_through_worker_to_done() {
-    let (_tmp, vault_id, store) = setup().await;
+    let (_tmp, vault_id, store, vault) = setup().await;
+    let url = "https://stub.test/ok-done";
     let job_id = store
-        .insert_job(vault_id, "test.echo", "{\"n\": 0}")
+        .insert_job(vault_id, pipeline::JOB_KIND_INGEST_URL, &payload(url))
         .await
         .expect("insert");
 
-    let mock = Arc::new(MockProvider::new(vec![Scripted::Ok(
-        serde_json::json!({"ok": true}),
-    )]));
-    let handles = spawn_workers(Arc::clone(&store), mock.clone(), vault_id, fast_cfg(1));
+    let mock = Arc::new(MockProvider::new(vec![]));
+    let handles = spawn_workers(Arc::clone(&store), mock, vault, vault_id, fast_cfg(1));
 
     wait_for_status(&store, vault_id, &[job_id], "done").await;
 
     let (status, _attempts, _error, finished_at) = row(&store, job_id).await;
     assert_eq!(status, "done");
     assert!(finished_at.is_some(), "finished_at must be stamped");
-    assert_eq!(mock.call_count(), 1, "exactly one provider call");
+    assert_eq!(url_count(url), 1, "exactly one handler fetch");
     for h in handles {
         h.abort();
     }
 }
 
-/// D-04 / LLMP-02: with N=2 workers and 2×N jobs of 50ms SlowOk responses,
-/// the mock's in-flight gauge must reach the bound (real parallelism) and,
+/// D-04 / LLMP-02: with N=2 workers and 2×N jobs of ~50ms in-flight fetches,
+/// the stub's in-flight gauge must reach the bound (real parallelism) and,
 /// being a running max, proves it never exceeded N.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pool_is_bounded() {
-    let (_tmp, vault_id, store) = setup().await;
+    let (_tmp, vault_id, store, vault) = setup().await;
+    let urls: Vec<String> = (0..4)
+        .map(|i| format!("https://stub.test/slow-{i}"))
+        .collect();
     let ids: Vec<i64> = {
         let mut v = Vec::new();
-        for i in 0..4 {
+        for u in &urls {
             v.push(
                 store
-                    .insert_job(vault_id, "test.echo", &format!("{{\"n\": {i}}}"))
+                    .insert_job(vault_id, pipeline::JOB_KIND_INGEST_URL, &payload(u))
                     .await
                     .expect("insert"),
             );
@@ -149,52 +231,46 @@ async fn pool_is_bounded() {
         v
     };
 
-    // Delayed successes so every response is in-flight for ~50ms and the
-    // gauge can actually observe overlap (instant Ok would pass trivially).
-    let mock = Arc::new(MockProvider::new(
-        (0..4)
-            .map(|_| Scripted::SlowOk {
-                delay: Duration::from_millis(50),
-                value: serde_json::json!({"ok": true}),
-            })
-            .collect(),
-    ));
-    let handles = spawn_workers(Arc::clone(&store), mock.clone(), vault_id, fast_cfg(2));
+    let mock = Arc::new(MockProvider::new(vec![]));
+    let handles = spawn_workers(Arc::clone(&store), mock, vault, vault_id, fast_cfg(2));
 
     wait_for_status(&store, vault_id, &ids, "done").await;
 
     assert_eq!(
-        mock.max_concurrent_calls(),
+        SLOW_MAX_INFLIGHT.load(Ordering::SeqCst),
         2,
         "pool must reach the bound (2) and never exceed it"
     );
-    assert_eq!(mock.call_count(), 4);
+    assert!(urls.iter().all(|u| url_count(u) == 1), "4 fetches total");
     for h in handles {
         h.abort();
     }
 }
 
 /// SC3 kill-9 simulation: task abort is the exact observable equivalent of
-/// kill -9 — the heartbeat stops and the in-flight call is abandoned. The
-/// job returns via claim expiry, is re-claimed by a fresh worker, and
+/// kill -9 — the heartbeat stops and the in-flight handler call is abandoned.
+/// The job returns via claim expiry, is re-claimed by a fresh worker, and
 /// completes exactly once (no loss, no duplication).
 #[tokio::test]
 async fn crash_mid_job_resumes_without_duplication() {
-    let (_tmp, vault_id, store) = setup().await;
+    let (_tmp, vault_id, store, vault) = setup().await;
+    let url = "https://stub.test/hangfirst-crash";
     let job_id = store
-        .insert_job(vault_id, "test.echo", "{\"n\": 0}")
+        .insert_job(vault_id, pipeline::JOB_KIND_INGEST_URL, &payload(url))
         .await
         .expect("insert");
 
     // Worker A hangs 10s (never returns); worker B then succeeds.
-    let mock = Arc::new(MockProvider::new(vec![
-        Scripted::Hang(Duration::from_secs(10)),
-        Scripted::Ok(serde_json::json!({"ok": true})),
-    ]));
     let cfg = fast_cfg(1); // claim expiry 300ms
 
-    let mut handles_a = spawn_workers(Arc::clone(&store), mock.clone(), vault_id, cfg.clone());
-    wait_call_count(&mock, 1).await; // A claimed and is hung mid-call
+    let mut handles_a = spawn_workers(
+        Arc::clone(&store),
+        Arc::new(MockProvider::new(vec![])),
+        Arc::clone(&vault),
+        vault_id,
+        cfg.clone(),
+    );
+    wait_url_calls(url, 1).await; // A claimed and is hung mid-fetch
 
     // kill -9: abort drops the worker task AND its heartbeat branch, so the
     // lease goes stale exactly like a dead process.
@@ -202,25 +278,26 @@ async fn crash_mid_job_resumes_without_duplication() {
         h.abort();
     }
 
-    // Worker B: same store + provider, fresh task. Its reaper returns the
-    // stale claim to pending after expiry; it then claims and completes.
-    let handles_b = spawn_workers(Arc::clone(&store), mock.clone(), vault_id, cfg);
+    // Worker B: same store + vault, fresh task. Its reaper returns the stale
+    // claim to pending after expiry; it then claims and completes.
+    let handles_b = spawn_workers(
+        Arc::clone(&store),
+        Arc::new(MockProvider::new(vec![])),
+        vault,
+        vault_id,
+        cfg,
+    );
 
     wait_for_status(&store, vault_id, &[job_id], "done").await;
 
     let (status, attempts, _error, finished_at) = row(&store, job_id).await;
     assert_eq!(status, "done");
     assert!(finished_at.is_some(), "finished_at stamped exactly once");
-    assert_eq!(mock.call_count(), 2, "hang + success, no third execution");
+    assert_eq!(url_count(url), 2, "hang + success, no third execution");
     // Reap preserves attempts and B never failed, so the crash path adds none.
     assert_eq!(
         attempts, 0,
         "reaped claim preserves attempts (no fail_job on abort)"
-    );
-    assert_eq!(
-        mock.remaining().await,
-        0,
-        "script fully consumed — no extra call"
     );
     for h in handles_b {
         h.abort();
@@ -231,25 +308,23 @@ async fn crash_mid_job_resumes_without_duplication() {
 /// NOT reaped; a claimed job without a heartbeat IS reaped by the same call.
 #[tokio::test]
 async fn heartbeat_keeps_live_job_unreaped() {
-    let (_tmp, vault_id, store) = setup().await;
+    let (_tmp, vault_id, store, vault) = setup().await;
+    let url = "https://stub.test/hangfail-hb";
     let job_id = store
-        .insert_job(vault_id, "test.echo", "{\"n\": 0}")
+        .insert_job(vault_id, pipeline::JOB_KIND_INGEST_URL, &payload(url))
         .await
         .expect("insert");
 
-    let mock = Arc::new(MockProvider::new(vec![
-        Scripted::Hang(Duration::from_millis(500)),
-        Scripted::Ok(serde_json::json!({"ok": true})),
-    ]));
     let handles = spawn_workers(
         Arc::clone(&store),
-        mock.clone(),
+        Arc::new(MockProvider::new(vec![])),
+        vault,
         vault_id,
         fast_cfg(1), // heartbeat 50ms, expiry 300ms
     );
 
-    wait_call_count(&mock, 1).await; // claimed + hung
-                                     // Past the expiry window while still hung and heartbeating.
+    wait_url_calls(url, 1).await; // claimed + hung 500ms
+                                  // Past the expiry window while still hung and heartbeating.
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     let reaped = store
@@ -281,8 +356,8 @@ async fn heartbeat_keeps_live_job_unreaped() {
         "reaped control returned to pending"
     );
 
-    // Hang resolves (fails 500) → fail_job backs the job off by the real D-09
-    // 30s gate. That gate is already proven at store level (02-02
+    // Hang resolves (fails after 500ms) → fail_job backs the job off by the
+    // real D-09 30s gate. That gate is already proven at store level (02-02
     // backoff_gates_claim); clear it here so the done path is observable
     // within the test budget.
     wait_for_status(&store, vault_id, &[job_id], "pending").await;
@@ -293,7 +368,7 @@ async fn heartbeat_keeps_live_job_unreaped() {
         .expect("clear backoff gate");
 
     wait_for_status(&store, vault_id, &[job_id], "done").await;
-    assert_eq!(mock.call_count(), 2, "hang + success");
+    assert_eq!(url_count(url), 2, "fail + success");
     for h in handles {
         h.abort();
     }
@@ -303,19 +378,25 @@ async fn heartbeat_keeps_live_job_unreaped() {
 /// worker's Err path must route through fail_job and stamp the first D-09
 /// backoff (~now+30s); the ladder to dead-letter is then driven by fail_job
 /// with injected clocks (the gate itself is proven at store level in 02-02).
+/// Since 03-01 the unknown kind `test.echo` is itself the loud handler error.
 #[tokio::test]
 async fn provider_failure_routes_through_backoff_then_dead() {
-    let (_tmp, vault_id, store) = setup().await;
+    let (_tmp, vault_id, store, vault) = setup().await;
     let job_id = store
         .insert_job(vault_id, "test.echo", "{\"n\": 0}")
         .await
         .expect("insert");
 
-    let mock = Arc::new(MockProvider::new(vec![Scripted::Fail { status: 500 }]));
     let t0 = Utc::now();
-    let handles = spawn_workers(Arc::clone(&store), mock.clone(), vault_id, fast_cfg(1));
+    let handles = spawn_workers(
+        Arc::clone(&store),
+        Arc::new(MockProvider::new(vec![])),
+        vault,
+        vault_id,
+        fast_cfg(1),
+    );
 
-    // Phase 1 (through the worker): provider Err → fail_job → pending,
+    // Phase 1 (through the worker): handler Err → fail_job → pending,
     // attempts=1, next_attempt_at ≈ now + 30s (no real 30s wait).
     for _ in 0..500 {
         let (status, attempts, _, _) = row(&store, job_id).await;
@@ -374,13 +455,16 @@ async fn provider_failure_routes_through_backoff_then_dead() {
 /// executes exactly once (no duplication, no loss).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_workers_no_duplication() {
-    let (_tmp, vault_id, store) = setup().await;
+    let (_tmp, vault_id, store, vault) = setup().await;
+    let urls: Vec<String> = (0..6)
+        .map(|i| format!("https://stub.test/ok-conc-{i}"))
+        .collect();
     let ids: Vec<i64> = {
         let mut v = Vec::new();
-        for i in 0..6 {
+        for u in &urls {
             v.push(
                 store
-                    .insert_job(vault_id, "test.echo", &format!("{{\"n\": {i}}}"))
+                    .insert_job(vault_id, pipeline::JOB_KIND_INGEST_URL, &payload(u))
                     .await
                     .expect("insert"),
             );
@@ -388,16 +472,20 @@ async fn concurrent_workers_no_duplication() {
         v
     };
 
-    let mock = Arc::new(MockProvider::new(
-        (0..6)
-            .map(|_| Scripted::Ok(serde_json::json!({"ok": true})))
-            .collect(),
-    ));
-    let handles = spawn_workers(Arc::clone(&store), mock.clone(), vault_id, fast_cfg(4));
+    let handles = spawn_workers(
+        Arc::clone(&store),
+        Arc::new(MockProvider::new(vec![])),
+        vault,
+        vault_id,
+        fast_cfg(4),
+    );
 
     wait_for_status(&store, vault_id, &ids, "done").await;
 
-    assert_eq!(mock.call_count(), 6, "each job executed exactly once");
+    assert!(
+        urls.iter().all(|u| url_count(u) == 1),
+        "each job executed exactly once"
+    );
     let done = store.list_jobs(vault_id, Some("done")).await.expect("list");
     assert_eq!(done.len(), 6);
     assert!(store
