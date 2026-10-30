@@ -23,7 +23,7 @@ use tempfile::TempDir;
 
 use saussunet_core::config::{FileConfig, RuntimeConfig};
 use saussunet_core::error::{CoreError, Result as CoreResult};
-use saussunet_core::llm::MockProvider;
+use saussunet_core::llm::{MockProvider, Scripted};
 use saussunet_core::pipeline::fetch::FetchResult;
 use saussunet_core::pipeline::{self, Fetcher};
 use saussunet_core::queue::{spawn_workers, WorkerConfig};
@@ -121,6 +121,17 @@ fn payload(url: &str) -> String {
     format!("{{\"url\": \"{url}\", \"source_id\": \"{url}\"}}")
 }
 
+/// 03-03: ingest_url jobs now run the LLM passes — script `n` empty
+/// candidate lists so the queue mechanics under test never hit script
+/// exhaustion (extra entries are never consumed, never an error).
+fn idle_mock(n: usize) -> Arc<MockProvider> {
+    Arc::new(MockProvider::new(
+        std::iter::repeat_with(|| Scripted::Ok(serde_json::json!({ "candidates": [] })))
+            .take(n)
+            .collect(),
+    ))
+}
+
 fn url_count(url: &str) -> usize {
     CALLS.lock().unwrap().get(url).copied().unwrap_or(0)
 }
@@ -195,7 +206,7 @@ async fn job_flows_through_worker_to_done() {
         .await
         .expect("insert");
 
-    let mock = Arc::new(MockProvider::new(vec![]));
+    let mock = idle_mock(16);
     let handles = spawn_workers(Arc::clone(&store), mock, vault, vault_id, fast_cfg(1));
 
     wait_for_status(&store, vault_id, &[job_id], "done").await;
@@ -231,7 +242,7 @@ async fn pool_is_bounded() {
         v
     };
 
-    let mock = Arc::new(MockProvider::new(vec![]));
+    let mock = idle_mock(16);
     let handles = spawn_workers(Arc::clone(&store), mock, vault, vault_id, fast_cfg(2));
 
     wait_for_status(&store, vault_id, &ids, "done").await;
@@ -265,7 +276,7 @@ async fn crash_mid_job_resumes_without_duplication() {
 
     let mut handles_a = spawn_workers(
         Arc::clone(&store),
-        Arc::new(MockProvider::new(vec![])),
+        idle_mock(16),
         Arc::clone(&vault),
         vault_id,
         cfg.clone(),
@@ -280,13 +291,7 @@ async fn crash_mid_job_resumes_without_duplication() {
 
     // Worker B: same store + vault, fresh task. Its reaper returns the stale
     // claim to pending after expiry; it then claims and completes.
-    let handles_b = spawn_workers(
-        Arc::clone(&store),
-        Arc::new(MockProvider::new(vec![])),
-        vault,
-        vault_id,
-        cfg,
-    );
+    let handles_b = spawn_workers(Arc::clone(&store), idle_mock(16), vault, vault_id, cfg);
 
     wait_for_status(&store, vault_id, &[job_id], "done").await;
 
@@ -317,7 +322,7 @@ async fn heartbeat_keeps_live_job_unreaped() {
 
     let handles = spawn_workers(
         Arc::clone(&store),
-        Arc::new(MockProvider::new(vec![])),
+        idle_mock(16),
         vault,
         vault_id,
         fast_cfg(1), // heartbeat 50ms, expiry 300ms
@@ -390,7 +395,7 @@ async fn provider_failure_routes_through_backoff_then_dead() {
     let t0 = Utc::now();
     let handles = spawn_workers(
         Arc::clone(&store),
-        Arc::new(MockProvider::new(vec![])),
+        idle_mock(16),
         vault,
         vault_id,
         fast_cfg(1),
@@ -474,7 +479,7 @@ async fn concurrent_workers_no_duplication() {
 
     let handles = spawn_workers(
         Arc::clone(&store),
-        Arc::new(MockProvider::new(vec![])),
+        idle_mock(16),
         vault,
         vault_id,
         fast_cfg(4),
