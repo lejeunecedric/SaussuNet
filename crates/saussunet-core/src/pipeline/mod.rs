@@ -129,6 +129,18 @@ async fn ingest_url(
         payload.source_id.clone()
     };
     let result = fetcher().fetch(&payload.url).await?;
+
+    // PIPE-02 / D-08: unchanged-source no-op. The digest comparison happens
+    // after fetch (sha256 is only known post-fetch); "skip" means skipping the
+    // EXTRACTION half — fetch is cheap, the LLM is expensive. When the digest
+    // matches sync_state the job completes as a no-op: zero LLM calls, zero
+    // vault writes (Pitfall 1 token-burn bound).
+    let prev = store.get_source_sha256(vault.id, &source_id).await?;
+    if prev.as_deref() == Some(result.sha256.as_str()) {
+        tracing::info!(source_id = %source_id, "unchanged source — no-op");
+        return Ok(());
+    }
+
     let slug_src = if result.title.trim().is_empty() {
         url_host(&result.final_url)
     } else {
@@ -147,13 +159,46 @@ async fn ingest_url(
         result.markdown.as_bytes(),
     )
     .await?;
+
+    // D-08 drift: same source, new digest → loud log.md entry before the
+    // re-extraction (first-seen sources, prev == None, log nothing extra).
+    // Subject is sanitized with writer.rs's log-injection guard (T-02-05);
+    // the entry carries only URL/title + old/new digests, never page content.
+    if let Some(old_sha) = prev {
+        let subject = if result.title.trim().is_empty() {
+            payload.url.as_str()
+        } else {
+            result.title.as_str()
+        };
+        let drift_raw_rel = raw_path
+            .strip_prefix(&vault.root)
+            .unwrap_or(&raw_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        vault::log::append_entry(
+            vault,
+            &format!(
+                "## [{}] drift | {}",
+                Utc::now().format("%Y-%m-%d"),
+                crate::vault::writer::sanitize_for_nav(subject)
+            ),
+            &[
+                format!("- sha256 {old_sha} -> {}", result.sha256),
+                format!("- re-ingested {drift_raw_rel}"),
+            ],
+        )
+        .await?;
+    }
+
+    run_extraction_passes(store, vault, provider, &raw_path, &source_id, &result).await?;
     // D-08: the digest lands in its own sync_state.sha256 column
-    // (migration 0007 — 03-01's `token` placeholder is retired; the
-    // migration backfilled any rows written before this change).
+    // (migration 0007 — 03-01's `token` placeholder is retired). Stored
+    // AFTER extraction succeeds (03-04 move): a job that crashed mid-extraction
+    // must re-ingest on re-claim rather than silently no-op next time (D-02).
     store
         .set_source_sha256(vault.id, &source_id, &result.sha256)
         .await?;
-    run_extraction_passes(store, vault, provider, &raw_path, &source_id, &result).await
+    Ok(())
 }
 
 /// Page-creation threshold default (D-14): "2+ sources". The resolved

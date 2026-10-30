@@ -31,7 +31,7 @@ pub enum WriteOutcome {
 /// Newlines become spaces (a title can no longer start a new line), and the
 /// `## [` sequence is collapsed to `##[` so whole-file scanners cannot match
 /// a forged entry shape inside a subject.
-fn sanitize_for_nav(s: &str) -> String {
+pub(crate) fn sanitize_for_nav(s: &str) -> String {
     s.replace(['\r', '\n'], " ").replace("## [", "##[")
 }
 
