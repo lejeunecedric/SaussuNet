@@ -1,9 +1,9 @@
 ---
-status: partial
+status: diagnosed
 phase: 03-extraction-pipeline
 source: 03-01-SUMMARY.md, 03-02-SUMMARY.md, 03-03-SUMMARY.md, 03-04-SUMMARY.md, 03-05-SUMMARY.md, 03-06-SUMMARY.md, 03-07-SUMMARY.md, 03-08-SUMMARY.md
 started: 2026-10-30T22:44:44Z
-updated: 2026-10-30T23:59:00Z
+updated: 2026-10-30T23:08:01Z
 ---
 
 ## Current Test
@@ -78,7 +78,14 @@ blocked: 0
   reason: "User reported: local Halogen endpoint times out (>300s) on pass-1 prompts for substantial pages; repro with exact pass1_prompt never completed in 573s"
   severity: minor
   test: 9
-  root_cause: ""     # Filled by diagnosis
-  artifacts: []      # Filled by diagnosis
-  missing: []        # Filled by diagnosis
-  debug_session: ""  # Filled by diagnosis
+  root_cause: "Not a hang: Halogen defaults to enable_thinking=true with reasoning_effort=xhigh (HALOGEN_MAX_TOKENS_DEFAULT=32768), so the model spends ~410s (~25k thinking tokens) before emitting the answer — streamed run of the exact 8637-byte pass-1 prompt completed at t=467s with valid JSON (finish=stop). The daemon's reqwest 300s total timeout (llm/openai_compat.rs) fires mid-thinking every time. Server logs corroborate: 'client disconnected mid-request (non-streaming), N token(s) generated and dropped'. Refuted: prompt pathology (same prompt returns valid JSON in 14.8s with chat_template_kwargs {enable_thinking:false}, 46s with reasoning_effort=low), server wedge, response_format interaction. Verdict: environment/model behavior + client sending no generation params — not a pipeline defect."
+  artifacts:
+    - path: "crates/saussunet-core/src/llm/openai_compat.rs"
+      issue: "sends no generation parameters; 300s total timeout kills slow-thinking requests"
+    - path: "~/.config/containers/systemd/user/halogen.container"
+      issue: "server default xhigh thinking budget (HALOGEN_MAX_TOKENS_DEFAULT=32768) shared by all clients"
+  missing:
+    - "Send chat_template_kwargs {enable_thinking:false} (or reasoning_effort low) best-effort, mirroring the existing response_format fallback"
+    - "Optional explicit max_tokens paired with finish_reason==length handling"
+    - "Or streaming with idle timeout instead of 300s total timeout"
+  debug_session: "/home/c/.hermes/profiles/devo/cache/delegation/live/deleg_9da2859d/task-0.log"
