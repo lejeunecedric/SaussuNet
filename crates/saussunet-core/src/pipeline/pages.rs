@@ -1,11 +1,12 @@
-//! Threshold gate + registry resolve/upsert + page assembly + write_page
-//! funnel (plan 03-03, D-10/D-14..D-17).
+//! Threshold gate + registry resolve/upsert + page assembly + validator
+//! funnel (plans 03-03/03-06, D-10/D-14..D-17, PIPE-06).
 //!
 //! The ONLY disk write in the extraction pipeline is
-//! [`vault::writer::write_page`] (validator funnel, PIPE-06 backstop):
-//! the LLM's output becomes page markdown here and nothing else — a
-//! poisoned output can only express schema-shaped text, and every page
-//! still passes the writer's frontmatter/wikilink/gen_hash gauntlet.
+//! [`vault::writer::write_generated_page`] → `write_page` (validator funnel,
+//! PIPE-06): the LLM's output becomes page markdown here and nothing else —
+//! the deterministic validator rejects dangling links, missing provenance,
+//! and wiki-as-source before any write, and every page still passes the
+//! writer's frontmatter/wikilink/gen_hash gauntlet.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -91,6 +92,7 @@ pub async fn gate_and_write(
 ) -> Result<Vec<PathBuf>> {
     let taxonomy = schema::parse_tag_taxonomy(vault)?;
     let mut written = Vec::new();
+    let mut rejected: u32 = 0;
 
     for candidate in &pass1.candidates {
         if candidate.name.trim().is_empty() {
@@ -165,7 +167,26 @@ pub async fn gate_and_write(
             &existing,
             &taxonomy,
         );
-        match vault::writer::write_page(vault, store, &rel_path, &page).await? {
+        let outcome = match vault::writer::write_generated_page(vault, store, &rel_path, &page)
+            .await
+        {
+            Ok(outcome) => outcome,
+            // PIPE-06: deterministic validator rejection. Log rule names +
+            // offending targets only (never the body — a poisoned page may
+            // carry attacker text, D-03), record the rejected content for
+            // the Phase 5 review queue, and CONTINUE: one bad page never
+            // fails the whole job.
+            Err(CoreError::Validation(reason)) => {
+                rejected += 1;
+                tracing::warn!("pipeline: {rel_path} rejected by write-path validator: {reason}");
+                store
+                    .insert_proposal(vault.id, &rel_path, "validation_rejected", &page)
+                    .await?;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        match outcome {
             WriteOutcome::Written { path } => {
                 // Record the page path on the registry row, preserving the
                 // (possibly alias-merged) aliases from the previous write.
@@ -200,6 +221,10 @@ pub async fn gate_and_write(
             }
         }
     }
+    tracing::info!(
+        "pipeline: {source_id} — {} page(s) written, {rejected} validation-rejected",
+        written.len()
+    );
     Ok(written)
 }
 

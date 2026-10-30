@@ -32,7 +32,8 @@ pub struct ProposalSummary {
 
 impl Store {
     /// Record a refused write as a conflict row. `reason` must be one of
-    /// `gen_hash_mismatch`, `protected`, `human_owned` (CHECK constraint).
+    /// `gen_hash_mismatch`, `protected`, `human_owned`, `validation_rejected`
+    /// (CHECK constraint; migration 0008 added the validator reason).
     pub async fn insert_proposal(
         &self,
         vault_id: i64,

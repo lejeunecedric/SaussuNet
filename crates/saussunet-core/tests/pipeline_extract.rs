@@ -44,6 +44,14 @@ async fn setup() -> (TempDir, i64, Arc<Store>, Arc<Vault>) {
     let cfg: FileConfig = toml::from_str(&toml).expect("config parses");
     let rt: RuntimeConfig = cfg.resolve().expect("resolve");
     let (store, vault) = boot_open(&rt).await.expect("boot");
+    // PIPE-06 whitelist: two pre-existing wiki pages the pass-2 fixtures
+    // link to, discoverable via index.md stems.
+    saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "Meta", "Meta")
+        .await
+        .expect("index Meta");
+    saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "JavaScript", "JavaScript")
+        .await
+        .expect("index JavaScript");
     (tmp, vault.id, Arc::new(store), Arc::new(vault))
 }
 
@@ -87,16 +95,23 @@ fn today() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
 
-/// Pass-2 page JSON for `title`, with ≥2 wikilinks and a provenance marker.
+/// The raw/ path `write_raw` produces for the stub fetch (title "Hello Post").
+/// PIPE-06: provenance markers must point at this real file.
+fn raw_rel() -> String {
+    format!("raw/{}-hello-post.md", today())
+}
+
+/// Pass-2 page JSON for `title`, with ≥2 whitelisted wikilinks and a
+/// provenance marker to the real raw/ file (PIPE-06 validator passes).
 fn page_json(title: &str, page_type: &str) -> serde_json::Value {
     json!({
         "title": title,
         "page_type": page_type,
         "tags": ["technology"],
-        "summary": format!("{title} is a UI technology. ^[raw/stub.md]"),
+        "summary": format!("{title} is a UI technology. ^[{}]", raw_rel()),
         "sections": [{
             "heading": "Overview",
-            "markdown": format!("{title} is maintained widely. ^[raw/stub.md] See [[Meta]] and [[JavaScript]].")
+            "markdown": format!("{title} is maintained widely. ^[{}] See [[Meta]] and [[JavaScript]].", raw_rel())
         }],
         "contested": false,
         "contradictions": []
@@ -251,6 +266,8 @@ async fn second_distinct_source_crosses_min_sources_threshold() {
 #[tokio::test]
 async fn contradiction_keeps_both_claims_and_sets_contested() {
     let (_tmp, _vault_id, store, vault) = setup().await;
+    // The old source must exist under raw/ — PIPE-06 validates source files.
+    std::fs::write(vault.root().join("raw/old.md"), "# old source\n").expect("raw/old.md");
     // Pre-existing agent-written page (gen_hash recorded by write_page).
     let existing = "---\ntitle: React\ncreated: 2020-01-01\nupdated: 2020-01-01\n\
                     type: entity\ntags: [technology]\nsources: [raw/old.md]\n---\n\n\
@@ -272,8 +289,8 @@ async fn contradiction_keeps_both_claims_and_sets_contested() {
         "summary": "React is a UI library.",
         "sections": [{
             "heading": "Origin",
-            "markdown": "React was created by Jordan. See [[JavaScript]] and [[Meta]]. \
-                          React was created by Chad. ^[raw/stub.md]"
+            "markdown": format!("React was created by Jordan. See [[JavaScript]] and [[Meta]]. \
+                          React was created by Chad. ^[{}]", raw_rel())
         }],
         "contested": true,
         "contradictions": ["origin of React"]
@@ -304,6 +321,70 @@ async fn contradiction_keeps_both_claims_and_sets_contested() {
     assert!(
         fm.sources.iter().any(|s| s == &raw_rel),
         "new source merged"
+    );
+}
+
+/// PIPE-06 / ROADMAP SC5: a poisoned pass-2 output with a hallucinated
+/// wikilink NEVER reaches disk — the deterministic validator rejects it, the
+/// rejection is recorded as a `validation_rejected` proposal for Phase 5
+/// review, the job still completes, and the sibling page is still written.
+#[tokio::test]
+async fn hallucinated_link_page_never_reaches_disk_and_is_recorded() {
+    let (_tmp, vault_id, store, vault) = setup().await;
+    let pass1 = json!({
+        "candidates": [
+            {"name": "React", "kind": "entity", "mentions": 5, "central": true,
+             "justification": "about React", "aliases": []},
+            {"name": "Rust", "kind": "entity", "mentions": 4, "central": true,
+             "justification": "also central", "aliases": []}
+        ]
+    });
+    let mut poisoned = page_json("Rust", "entity");
+    poisoned["sections"][0]["markdown"] = json!(format!(
+        "Rust is a systems language. ^[{}] See [[Dangling Link]] and [[Meta]].",
+        raw_rel()
+    ));
+    let provider = Arc::new(MockProvider::new(vec![
+        Scripted::Ok(pass1),
+        Scripted::Ok(page_json("React", "entity")),
+        Scripted::Ok(poisoned),
+    ]));
+    // run_ingest asserts handle_job returns Ok → the job completes despite
+    // the rejected page (one bad page never fails the whole job).
+    run_ingest(
+        &store,
+        &vault,
+        &provider_arc(&provider),
+        "https://example.com/poison",
+        "src-p",
+    )
+    .await;
+
+    // Sibling page written; poisoned page absent from disk (SC5).
+    assert!(
+        page_exists(&vault, "entities/react.md"),
+        "valid sibling still written"
+    );
+    assert!(
+        !page_exists(&vault, "entities/rust.md"),
+        "poisoned page must NEVER reach disk"
+    );
+
+    // Rejection recorded for the Phase 5 review queue, naming the target.
+    let proposals = store.list_pending_proposals(vault_id).await.unwrap();
+    let rejected: Vec<_> = proposals
+        .iter()
+        .filter(|p| p.reason == "validation_rejected")
+        .collect();
+    assert_eq!(
+        rejected.len(),
+        1,
+        "exactly one validation rejection: {proposals:?}"
+    );
+    assert_eq!(rejected[0].target_path, "entities/rust.md");
+    assert!(
+        rejected[0].proposed_content.contains("Dangling Link"),
+        "proposal keeps the rejected content for review"
     );
 }
 

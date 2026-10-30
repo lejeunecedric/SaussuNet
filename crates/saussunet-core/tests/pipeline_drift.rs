@@ -73,6 +73,14 @@ async fn setup() -> (TempDir, i64, Arc<Store>, Arc<Vault>) {
     let cfg: FileConfig = toml::from_str(&toml).expect("config parses");
     let rt: RuntimeConfig = cfg.resolve().expect("resolve");
     let (store, vault) = boot_open(&rt).await.expect("boot");
+    // PIPE-06 whitelist: two pre-existing wiki pages the pass-2 fixtures
+    // link to, discoverable via index.md stems.
+    saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "Meta", "Meta")
+        .await
+        .expect("index Meta");
+    saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "JavaScript", "JavaScript")
+        .await
+        .expect("index JavaScript");
     (tmp, vault.id, Arc::new(store), Arc::new(vault))
 }
 
@@ -140,13 +148,14 @@ fn pass1_passing() -> serde_json::Value {
     })
 }
 
-/// Pass-2 page JSON for `title`, with ≥2 wikilinks and a provenance marker.
+/// Pass-2 page JSON for `title`, with ≥2 whitelisted wikilinks and a
+/// provenance marker to the real raw/ file (PIPE-06 validator passes).
 fn page_json(summary: &str) -> serde_json::Value {
     json!({
         "title": "React",
         "page_type": "entity",
         "tags": ["technology"],
-        "summary": format!("{summary} ^[raw/stub.md]"),
+        "summary": format!("{summary} ^[{}]", raw_rel()),
         "sections": [{
             "heading": "Overview",
             "markdown": format!("{summary} See [[Meta]] and [[JavaScript]].")

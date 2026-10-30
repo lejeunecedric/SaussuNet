@@ -12,7 +12,7 @@ use chrono::Utc;
 use crate::error::{CoreError, Result};
 use crate::store::Store;
 
-use super::{atomic, frontmatter, ghash, index, log, schema, Vault};
+use super::{atomic, frontmatter, ghash, index, log, schema, validate, Vault};
 
 /// Outcome of a [`write_page`] call. The three-way merge (D-05..D-08)
 /// decides between them: `Written` (first write or clean overwrite),
@@ -287,4 +287,22 @@ pub async fn write_page(
     .await?;
 
     Ok(WriteOutcome::Written { path: target })
+}
+
+/// PIPE-06 funnel: ALL LLM-generated content enters the vault here.
+///
+/// Runs the deterministic [`validate::validate_generated_page`] gate BEFORE
+/// any disk write, then delegates to [`write_page`] — validation rejects
+/// before anything touches the filesystem, and `write_page` remains the sole
+/// mutation entry point (this wrapper delegates, never bypasses; VLET-02).
+/// Human/CLI paths keep calling plain `write_page`: human-authored pages
+/// are not subject to the provenance rules.
+pub async fn write_generated_page(
+    vault: &Vault,
+    store: &Store,
+    rel_path: &str,
+    content: &str,
+) -> Result<WriteOutcome> {
+    validate::validate_generated_page(vault, store, rel_path, content).await?;
+    write_page(vault, store, rel_path, content).await
 }
