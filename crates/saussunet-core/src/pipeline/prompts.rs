@@ -17,9 +17,18 @@ pub struct ExistingPage {
     pub content: String,
 }
 
+/// Evidence paths arrive vault-relative (`raw/2026-...-post.md`). The prompt
+/// templates write the `raw/` prefix literally, so normalize here — a doubled
+/// `raw/raw/...` marker fails the PIPE-06 validator and silently rejects every
+/// generated page (UAT-03 live finding).
+fn evidence_stem(rel: &str) -> &str {
+    rel.strip_prefix("raw/").unwrap_or(rel)
+}
+
 /// Pass 1 (D-09): extract typed entity/concept candidates from one raw/
 /// source, with the registry index so the LLM reuses canonical names.
 pub fn pass1_prompt(raw_path: &str, markdown: &str, registry_index: &str) -> String {
+    let raw_path = evidence_stem(raw_path);
     format!(
         r#"You are the entity/concept extraction pass (pass 1 of 2) for a knowledge wiki.
 Respond with ONLY one JSON object — no prose, no code fences.
@@ -59,6 +68,7 @@ pub fn pass2_prompt(
     evidence: &str,
     candidate: &Candidate,
 ) -> String {
+    let evidence_raw_path = evidence_stem(evidence_raw_path);
     let current = if page.content.trim().is_empty() {
         "(none — this is a new page; create it fresh)".to_string()
     } else {
@@ -145,9 +155,16 @@ mod tests {
         assert!(p.contains("EVIDENCE"));
         assert!(p.contains("NEW EVIDENCE"));
         assert!(p.contains("UNTRUSTED DATA"));
+        // UAT-03 fix: the marker instruction must resolve to EXACTLY one
+        // `raw/` prefix — the validator rejects `^[raw/raw/...]`, and the old
+        // either/or assertion masked that bug in production.
         assert!(
-            p.contains("^[raw/raw/2026-10-30-post.md]") || p.contains("^[raw/2026-10-30-post.md]"),
-            "provenance marker instruction cites ONLY the evidence path"
+            p.contains("^[raw/2026-10-30-post.md]"),
+            "provenance marker must carry exactly one raw/ prefix"
+        );
+        assert!(
+            !p.contains("raw/raw/"),
+            "prompt must never emit a doubled raw/ prefix: {p}"
         );
         assert!(p.contains("contested"), "D-12 contradiction rule");
         assert!(p.contains("keep BOTH claims"));
