@@ -25,6 +25,16 @@ if grep -q 'axum' crates/saussunet-core/Cargo.toml; then
   exit 1
 fi
 
+echo "==> write-funnel guard (PIPE-06)"
+# Single-writer funnel: the only sanctioned disk writes in core src are the
+# atomic primitive (vault/atomic.rs) and raw records (vault/raw.rs). Pipeline
+# pages must go through vault::writer::write_generated_page — the LLM never
+# writes to the vault directly, and CI enforces it, not review.
+if grep -rn --include='*.rs' -E 'fs::write|File::create' crates/saussunet-core/src/ | grep -v 'vault/atomic.rs' | grep -v 'vault/raw.rs' | grep -v '//'; then
+  echo 'FORBIDDEN: direct fs write outside vault/atomic.rs / vault/raw.rs — use write_generated_page (PIPE-06 funnel)' >&2
+  exit 1
+fi
+
 echo "==> release build"
 cargo build --release
 
