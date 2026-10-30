@@ -115,10 +115,12 @@ impl Store {
     }
 
     /// D-16: merge pass-1 proposed aliases into `aliases_json` —
-    /// read-modify-write, case-insensitive dedup (normalization-aware),
-    /// canonical name kept OUT of the alias list. No-op if the entity row
-    /// does not exist (resolve-before-create guarantees the caller only
-    /// merges into known rows).
+    /// read-modify-write, case-insensitive dedup (display variants like
+    /// "React.js" vs "reactjs" are KEPT distinct — resolution applies
+    /// `normalize_name` at lookup time, so storage only needs to avoid
+    /// pure-case duplicates), canonical name kept OUT of the alias list.
+    /// No-op if the entity row does not exist (resolve-before-create
+    /// guarantees the caller only merges into known rows).
     pub async fn merge_aliases(
         &self,
         vault_id: i64,
@@ -135,11 +137,11 @@ impl Store {
         .await?;
         let Some(rec) = row else { return Ok(()) };
         let mut merged: Vec<String> = serde_json::from_str(&rec.aliases_json).unwrap_or_default();
-        let mut seen: std::collections::HashSet<String> =
-            merged.iter().map(|a| normalize_name(a)).collect();
-        seen.insert(normalize_name(canonical_name));
+        let lower = |s: &str| s.trim().to_lowercase();
+        let mut seen: std::collections::HashSet<String> = merged.iter().map(|a| lower(a)).collect();
+        seen.insert(lower(canonical_name));
         for alias in new_aliases {
-            let key = normalize_name(alias);
+            let key = lower(alias);
             if !key.is_empty() && seen.insert(key) {
                 merged.push(alias.clone());
             }
@@ -158,14 +160,51 @@ impl Store {
     }
 }
 
-/// Name normalization shared by resolve-before-create: lowercase, trim,
-/// collapse internal whitespace runs to a single space.
+/// Name normalization shared by resolve-before-create (D-15,
+/// deterministic-first — predictable beats clever, no fuzzy matching
+/// anywhere). Exact rule list:
+/// 1. trim, lowercase, collapse internal whitespace runs to one space;
+/// 2. strip ASCII punctuation `. , : ! ? ' "` (internal hyphens/spaces are
+///    kept — they are word separators, not noise);
+/// 3. fold simple English plurals on the trailing word:
+///    - `ies` → `y` (stories → story);
+///    - `es` dropped when preceded by a sibilant s/x/z/o (buses → bus,
+///      boxes → box, classes → class);
+///    - trailing `s` dropped only when the remainder is ≥ 4 chars and the
+///      word does not end in `ss` (SLS stays SLS, Glass ≠ Glas).
+///
+/// Deterministic and pure; known v1 limitation: "react.js" normalizes to
+/// "reactjs", NOT "react" — near-misses are handled by alias accumulation
+/// (D-16), never by scoring-based matching.
 pub(crate) fn normalize_name(name: &str) -> String {
-    name.trim()
+    let cleaned: String = name
+        .trim()
         .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+        .chars()
+        .filter(|c| !matches!(c, '.' | ',' | ':' | '!' | '?' | '\'' | '"'))
+        .collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    fold_simple_plural(&collapsed)
+}
+
+/// Step 3 of [`normalize_name`]: simple plural fold on the trailing word.
+fn fold_simple_plural(s: &str) -> String {
+    if let Some(stem) = s.strip_suffix("ies") {
+        if !stem.is_empty() {
+            return format!("{stem}y");
+        }
+    }
+    if let Some(stem) = s.strip_suffix("es") {
+        if matches!(stem.chars().next_back(), Some('s' | 'x' | 'z' | 'o')) {
+            return stem.to_string();
+        }
+    }
+    if let Some(stem) = s.strip_suffix('s') {
+        if !s.ends_with("ss") && stem.chars().count() >= 4 {
+            return stem.to_string();
+        }
+    }
+    s.to_string()
 }
 
 #[cfg(test)]
@@ -201,6 +240,68 @@ mod tests {
             .unwrap();
         assert_eq!(store.count_entity_sources(1, "React").await.unwrap(), 2);
         assert_eq!(store.count_entity_sources(1, "Unknown").await.unwrap(), 0);
+    }
+
+    /// D-15: normalization matrix — case, whitespace, punctuation, and
+    /// simple English plurals fold; everything else stays untouched.
+    #[test]
+    fn normalize_name_folds_case_whitespace_punctuation_and_plurals() {
+        // case
+        assert_eq!(normalize_name("Kubernetes"), normalize_name("kubernetes"));
+        // whitespace (trim + collapse)
+        assert_eq!(normalize_name("  React  "), normalize_name("react"));
+        // punctuation stripped
+        assert_eq!(normalize_name("React."), normalize_name("react"));
+        assert_eq!(normalize_name("Hello, World!"), "hello world");
+        // simple plurals
+        assert_eq!(normalize_name("Stories"), normalize_name("story"));
+        assert_eq!(normalize_name("Boxes"), normalize_name("box"));
+        assert_eq!(normalize_name("Buses"), normalize_name("bus"));
+        assert_eq!(
+            normalize_name("Fermat's Last Theorems"),
+            normalize_name("Fermat's Last Theorem")
+        );
+    }
+
+    /// D-15 deterministic-first: the fold must NOT mangle names that only
+    /// look like plurals — no fuzzy behaviour smuggled in via over-folding.
+    #[test]
+    fn normalize_name_does_not_overfold() {
+        assert_eq!(normalize_name("SLS"), "sls", "acronym not stripped to 'sl'");
+        assert_ne!(normalize_name("Glass"), normalize_name("Glas"));
+        assert_eq!(normalize_name("class"), normalize_name("class"));
+        // explicit v1 limitation: 'react.js' normalizes to 'reactjs', NOT
+        // 'react' — resolution stays exact-match, no fuzzy substring logic.
+        assert_ne!(normalize_name("react.js"), normalize_name("react"));
+    }
+
+    /// D-15: resolve-before-create is exact-match on canonical + aliases
+    /// through `normalize_name` — near-misses like "react.js" vs "React"
+    /// deliberately do NOT resolve (fuzzy matching deferred, v1 stance);
+    /// an ALIAS "reactjs" DOES resolve "ReactJS" (D-16 loop).
+    #[tokio::test]
+    async fn resolve_entity_exact_match_only_with_alias_support() {
+        let store = mem_store().await;
+        store
+            .upsert_entity(1, "React", "[]", None, Some("entity"))
+            .await
+            .unwrap();
+        // explicit v1 limitation: near-miss 'react.js' must NOT resolve
+        assert!(
+            store.resolve_entity(1, "react.js").await.unwrap().is_none(),
+            "deterministic exact match only — no fuzzy resolution"
+        );
+        // alias variant resolves to the canonical row
+        store
+            .merge_aliases(1, "React", &["reactjs".to_string()])
+            .await
+            .unwrap();
+        let hit = store
+            .resolve_entity(1, "ReactJS")
+            .await
+            .unwrap()
+            .expect("alias 'reactjs' resolves 'ReactJS'");
+        assert_eq!(hit.canonical_name, "React");
     }
 
     /// D-16: merge_aliases dedups case-insensitively and keeps the
