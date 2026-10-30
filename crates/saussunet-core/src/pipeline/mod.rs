@@ -38,6 +38,19 @@ pub struct IngestUrlPayload {
     pub source_id: String,
 }
 
+/// `ingest_pdf` payload schema (D-04): `{"raw_path": string, "source_id":
+/// string, "filename": string}` — `raw_path` is the vault-relative path of
+/// the immutable PDF copy written at submit time; `source_id` defaults to it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IngestPdfPayload {
+    #[serde(default)]
+    pub raw_path: String,
+    #[serde(default)]
+    pub source_id: String,
+    #[serde(default)]
+    pub filename: String,
+}
+
 /// Fetch seam so tests can inject a stub fetch (the SSRF guard legitimately
 /// blocks the loopback fixture servers a test would otherwise use). The
 /// production implementation is [`HttpFetcher`]; the override below is the
@@ -101,11 +114,150 @@ pub async fn handle_job(
                 .map_err(|e| CoreError::Queue(format!("ingest_url payload parse failed: {e}")))?;
             ingest_url(store, vault, provider, &payload).await
         }
-        JOB_KIND_INGEST_PDF => Err(CoreError::Queue(
-            "ingest_pdf is not implemented until plan 03-05".to_string(),
-        )),
+        JOB_KIND_INGEST_PDF => {
+            let payload: IngestPdfPayload = serde_json::from_str(&job.payload_json)
+                .map_err(|e| CoreError::Queue(format!("ingest_pdf payload parse failed: {e}")))?;
+            ingest_pdf(store, vault, provider, &payload).await
+        }
         other => Err(CoreError::Queue(format!("unknown job kind: {other}"))),
     }
+}
+
+/// D-04 upload flow (called by the binary's upload route — the binary stays
+/// transport-only, all guards live here): size cap → `%PDF-` magic + `.pdf`
+/// extension → slugified filename (attacker-controlled, NEVER a path) →
+/// byte-exact copy to `raw/papers/YYYY-MM-DD-slug.pdf` (immutable record) →
+/// sha256 from the copy → insert the `ingest_pdf` job. Returns
+/// `(job_id, raw_rel)`; the raw path also lives inside the job payload.
+/// Drift is N/A for uploads (D-04).
+pub async fn submit_pdf(
+    store: &Store,
+    vault: &Vault,
+    bytes: &[u8],
+    filename: &str,
+    max_upload_bytes: u64,
+) -> Result<(i64, String)> {
+    // Defense in depth: the route caps the body too (DefaultBodyLimit), but
+    // core never trusts its caller.
+    if (bytes.len() as u64) > max_upload_bytes {
+        return Err(CoreError::Vault(format!(
+            "upload of {} bytes exceeds max_upload_bytes ({max_upload_bytes})",
+            bytes.len()
+        )));
+    }
+    if !bytes.starts_with(b"%PDF-") {
+        return Err(CoreError::Vault(
+            "upload rejected: not a PDF (missing %PDF- magic bytes)".to_string(),
+        ));
+    }
+    if !filename.to_ascii_lowercase().ends_with(".pdf") {
+        return Err(CoreError::Vault(
+            "upload rejected: filename must end with .pdf".to_string(),
+        ));
+    }
+    // Filename is attacker-controlled: strip the extension, then fold to
+    // `[a-z0-9-]` — traversal is impossible by construction (write_raw's
+    // sanitizer refuses anything that folds to empty).
+    let stem = &filename[..filename.len() - 4];
+    let slug = vault::raw::sanitize_component(stem)?;
+    let pdf_path = vault::raw::write_raw_binary(vault, Some("papers"), &slug, "pdf", bytes).await?;
+    // sha256 is taken from the COPY by the worker (D-04) and recorded on the
+    // derived .md frontmatter + sync_state — the payload stays {raw_path,
+    // source_id, filename} per the plan schema.
+    let raw_rel = pdf_path
+        .strip_prefix(&vault.root)
+        .unwrap_or(&pdf_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let payload = serde_json::json!({
+        "raw_path": raw_rel,
+        "source_id": raw_rel,
+        "filename": filename,
+    });
+    let job_id = store
+        .insert_job(vault.id, JOB_KIND_INGEST_PDF, &payload.to_string())
+        .await?;
+    Ok((job_id, raw_rel))
+}
+
+/// D-04/D-06 worker half: read the raw PDF copy (path-guarded), extract text
+/// with the pdftotext subprocess, land the derived text as a second raw file
+/// (`raw/papers/YYYY-MM-DD-slug.md`, frontmatter source_url = the raw .pdf
+/// path, sha256 = sha of the PDF copy) so provenance markers follow the same
+/// D-07 shape as web pages — then run the SAME two-pass extraction as URLs.
+async fn ingest_pdf(
+    store: &Store,
+    vault: &Arc<Vault>,
+    provider: &Arc<dyn LlmProvider>,
+    payload: &IngestPdfPayload,
+) -> Result<()> {
+    if payload.raw_path.trim().is_empty() {
+        return Err(CoreError::Queue(
+            "ingest_pdf payload missing raw_path".to_string(),
+        ));
+    }
+    // The payload path is vault-relative and must resolve inside raw/ —
+    // absolute paths and traversal are refused before any read.
+    let rel = std::path::Path::new(&payload.raw_path);
+    if rel.is_absolute() || !rel.starts_with("raw") {
+        return Err(CoreError::Queue(format!(
+            "ingest_pdf raw_path must be a relative path under raw/: {}",
+            payload.raw_path
+        )));
+    }
+    let pdf_path = vault.root.join(rel);
+    if !pdf_path.starts_with(vault.root.join("raw")) {
+        return Err(CoreError::Queue(format!(
+            "ingest_pdf raw_path escapes raw/: {}",
+            payload.raw_path
+        )));
+    }
+    let bytes = tokio::fs::read(&pdf_path)
+        .await
+        .map_err(|e| CoreError::Io {
+            path: pdf_path.clone(),
+            source: e,
+        })?;
+    let sha256 = fetch::sha256_hex(&bytes);
+    let text = extract::pdf_to_text(&pdf_path).await?;
+
+    // Derived text file: reuse the PDF copy's slug (strip the date prefix) so
+    // the pair reads `YYYY-MM-DD-slug.pdf` / `YYYY-MM-DD-slug.md`.
+    let stem = pdf_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "paper".to_string());
+    let date_prefix = format!("{}-", Utc::now().format("%Y-%m-%d"));
+    let slug = stem.strip_prefix(&date_prefix).unwrap_or(&stem);
+    let source_id = if payload.source_id.trim().is_empty() {
+        payload.raw_path.clone()
+    } else {
+        payload.source_id.clone()
+    };
+    let md_path = vault::raw::write_raw(
+        vault,
+        Some("papers"),
+        slug,
+        "md",
+        &vault::raw::RawFrontmatter {
+            source_url: payload.raw_path.clone(),
+            ingested: Utc::now().to_rfc3339(),
+            sha256: sha256.clone(),
+        },
+        text.as_bytes(),
+    )
+    .await?;
+
+    store
+        .set_source_sha256(vault.id, &source_id, &sha256)
+        .await?;
+    let fetched = fetch::FetchResult {
+        final_url: payload.raw_path.clone(),
+        markdown: text,
+        sha256,
+        title: payload.filename.clone(),
+    };
+    run_extraction_passes(store, vault, provider, &md_path, &source_id, &fetched).await
 }
 
 /// D-02 walking slice: one job covers the whole source — fetch → extract →

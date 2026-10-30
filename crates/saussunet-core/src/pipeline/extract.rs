@@ -5,9 +5,74 @@
 //! fall back to converting the WHOLE document — a job must never fail just
 //! because a page has no `<article>`-shaped content.
 
+use std::path::Path;
+use std::time::Duration;
+
 use url::Url;
 
 use crate::error::{CoreError, Result};
+
+/// Hard bound on a single pdftotext run (threat model: a hostile PDF must
+/// never pin a worker forever).
+const PDFTOTEXT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Extract text from a PDF via the `pdftotext` subprocess (D-06: poppler,
+/// LOUD failure if missing, NO pure-Rust fallback). Fixed flags
+/// (`-q -layout <pdf> -`) + the guarded path only — no shell, no user string
+/// interpolated into args. A missing binary surfaces as
+/// [`CoreError::MissingBinary`] with the actionable install hint (the
+/// Display string lands in jobs.error on purpose).
+///
+/// Binary path: env `SAUSSUNET_PDFTOTEXT_PATH` overrides the default
+/// `pdftotext` (documented injection point for the missing-binary test).
+pub async fn pdf_to_text(pdf: &Path) -> Result<String> {
+    let binary =
+        std::env::var("SAUSSUNET_PDFTOTEXT_PATH").unwrap_or_else(|_| "pdftotext".to_string());
+    let spawned = tokio::process::Command::new(&binary)
+        .arg("-q")
+        .arg("-layout")
+        .arg(pdf)
+        .arg("-")
+        .output();
+    let out = match tokio::time::timeout(PDFTOTEXT_TIMEOUT, spawned).await {
+        Err(_elapsed) => {
+            return Err(CoreError::Fetch {
+                url: pdf.display().to_string(),
+                reason: format!("pdftotext timed out after {}s", PDFTOTEXT_TIMEOUT.as_secs()),
+            })
+        }
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CoreError::MissingBinary {
+                binary,
+                hint: "install poppler-utils (apt install poppler-utils)".to_string(),
+            })
+        }
+        Ok(Err(e)) => {
+            return Err(CoreError::Fetch {
+                url: pdf.display().to_string(),
+                reason: format!("pdftotext spawn failed: {e}"),
+            })
+        }
+        Ok(Ok(out)) => out,
+    };
+    if !out.status.success() {
+        // Truncated stderr tail only — never the PDF bytes or full text (D-03).
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail: String = stderr
+            .chars()
+            .rev()
+            .take(400)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        return Err(CoreError::Fetch {
+            url: pdf.display().to_string(),
+            reason: format!("pdftotext exited with {}: {}", out.status, tail),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
 
 /// Marker base URL for the reader (readability 0.3 requires a URL for
 /// link resolution; the fetched page's own URL is not needed for body

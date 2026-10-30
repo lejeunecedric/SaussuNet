@@ -38,6 +38,40 @@ pub async fn write_raw(
     frontmatter: &RawFrontmatter,
     body: &[u8],
 ) -> Result<PathBuf> {
+    let target = raw_target(vault, subdir, slug, ext)?;
+    // VLET-02: same single-writer lock as page writes — raw appends and page
+    // writes never interleave.
+    let _guard = vault.write_lock.lock().await;
+    let mut bytes = format!(
+        "---\nsource_url: {}\ningested: {}\nsha256: {}\n---\n\n",
+        frontmatter.source_url, frontmatter.ingested, frontmatter.sha256
+    )
+    .into_bytes();
+    bytes.extend_from_slice(body);
+    atomic::write_atomic(&target, &bytes).await?;
+    Ok(target)
+}
+
+/// Write a BINARY raw record (uploaded PDFs, D-04): same D-07 naming, lock
+/// and atomic path as [`write_raw`], but NO frontmatter — a binary copy must
+/// stay byte-exact to be the immutable record; its sha256/source_url live on
+/// the derived text file and in sync_state instead.
+pub async fn write_raw_binary(
+    vault: &Vault,
+    subdir: Option<&str>,
+    slug: &str,
+    ext: &str,
+    body: &[u8],
+) -> Result<PathBuf> {
+    let target = raw_target(vault, subdir, slug, ext)?;
+    let _guard = vault.write_lock.lock().await;
+    atomic::write_atomic(&target, body).await?;
+    Ok(target)
+}
+
+/// Resolve the D-07 target path `raw/[subdir/]YYYY-MM-DD-slug.ext` with the
+/// full sanitisation + containment gauntlet (shared by text and binary).
+fn raw_target(vault: &Vault, subdir: Option<&str>, slug: &str, ext: &str) -> Result<PathBuf> {
     let slug = sanitize_component(slug)?;
     let ext = sanitize_component(ext)?;
     let mut rel = PathBuf::from("raw");
@@ -62,24 +96,13 @@ pub async fn write_raw(
             target.display()
         )));
     }
-
-    // VLET-02: same single-writer lock as page writes — raw appends and page
-    // writes never interleave.
-    let _guard = vault.write_lock.lock().await;
-    let mut bytes = format!(
-        "---\nsource_url: {}\ningested: {}\nsha256: {}\n---\n\n",
-        frontmatter.source_url, frontmatter.ingested, frontmatter.sha256
-    )
-    .into_bytes();
-    bytes.extend_from_slice(body);
-    atomic::write_atomic(&target, &bytes).await?;
     Ok(target)
 }
 
 /// ASCII-fold one path component to `[a-z0-9-]`: every non-alphanumeric
 /// byte becomes `-`, runs collapse, leading/trailing dashes are trimmed.
 /// An empty result (e.g. `"../.."`) is refused — never a silent empty name.
-fn sanitize_component(raw: &str) -> Result<String> {
+pub(crate) fn sanitize_component(raw: &str) -> Result<String> {
     let folded = raw
         .to_ascii_lowercase()
         .chars()

@@ -59,6 +59,12 @@ pub enum CoreError {
     // never the page body (a poisoned page may contain attacker text, D-03).
     #[error("validation rejected: {0}")]
     Validation(String),
+
+    // Phase 3 (D-06): a required external binary is missing. Display carries
+    // the binary name + the actionable install hint — this string lands in
+    // jobs.error on purpose (LOUD failure, MoriNet mdbook pattern).
+    #[error("missing required binary '{binary}': {hint}")]
+    MissingBinary { binary: String, hint: String },
 }
 
 /// Convenience alias used across the core crate (never `anyhow` in the lib).

@@ -222,7 +222,7 @@ pub async fn fetch_url(client: &reqwest::Client, url: &Url) -> Result<FetchResul
     })
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
