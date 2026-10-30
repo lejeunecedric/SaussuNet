@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 
+use saussunet::http;
 use saussunet_core::config::load_config_or_default;
 use saussunet_core::error::CoreError;
 
@@ -133,6 +134,13 @@ async fn boot() -> anyhow::Result<()> {
     let store = std::sync::Arc::new(store);
     let vault = std::sync::Arc::new(vault);
     let provider = saussunet_core::llm::provider_from_config(&rt)?;
+    // HTTP surface (D-01): the endpoint only validates + enqueues — the
+    // worker drains the queue. Bind stays loopback by default (T-01-02).
+    let http_state = http::AppState {
+        store: store.clone(),
+        vault_id: rt.vault_id,
+        base_path: rt.base_path.clone(),
+    };
     // WR-03: the default "mock" provider has an empty script — draining the
     // queue with it would fail and dead-letter every job invisibly. Skip
     // spawning workers so jobs stay `pending` until a real provider is set.
@@ -156,8 +164,19 @@ async fn boot() -> anyhow::Result<()> {
         Vec::new()
     };
 
-    // NO ANALOG precedent: first long-lived mode. Ctrl-C → abort workers.
+    // Third long-lived task (plan 03-02): axum serve on the configured bind,
+    // routes nested under the base path (D-13).
+    let listener = tokio::net::TcpListener::bind(&rt.bind).await?;
+    let serve = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, http::build_router(http_state)).await {
+            eprintln!("http server error: {e}");
+        }
+    });
+    println!("http ready: http://{}{}/ingest", rt.bind, rt.base_path);
+
+    // NO ANALOG precedent: first long-lived mode. Ctrl-C → abort serve + workers.
     tokio::signal::ctrl_c().await?;
+    serve.abort();
     for h in handles {
         h.abort();
     }

@@ -1,6 +1,6 @@
 [package]
 name = "saussunet"
-description = "SaussuNet binary: self-hosted llm-wiki vault server (Phase 1: CLI only, no HTTP)."
+description = "SaussuNet binary: self-hosted llm-wiki vault server (Phase 3: HTTP ingest under the base path)."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -15,4 +15,16 @@ tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+
+[dev-dependencies]
+# Router-level tests drive the axum app via tower::ServiceExt::oneshot.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+# Real-bind smoke test only (GET /health over a loopback socket).
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }
