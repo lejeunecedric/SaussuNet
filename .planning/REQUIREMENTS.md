@@ -16,12 +16,12 @@ Requirements for initial release (lean v1). Each maps to roadmap phases.
 
 ### Ingestion Pipeline
 
-- [ ] **PIPE-01**: User can submit a web URL or PDF; the system extracts text, stores it under `raw/` with source frontmatter (`source_url`, `ingested`, `sha256`), and produces/updates entity and concept pages
-- [ ] **PIPE-02**: The pipeline skips unchanged sources (sha256 match) and flags changed ones for re-ingestion (source drift)
-- [ ] **PIPE-03**: Pages are created only above thresholds (entity/concept appears in 2+ sources or is central to one); passing mentions never create pages
-- [ ] **PIPE-04**: Near-duplicate entities are prevented by an entity registry with aliases and resolve-before-create matching
-- [ ] **PIPE-05**: Generated pages carry provenance (sources frontmatter, `^[raw/...]` markers on multi-source claims) and optional `confidence`/`contested` flags; contradictions are flagged, never auto-resolved
-- [ ] **PIPE-06**: Every generated page passes a deterministic write-path validator (link whitelist from index, frontmatter schema, provenance present) before it reaches disk — the LLM never writes to the vault directly
+- [x] **PIPE-01**: User can submit a web URL or PDF; the system extracts text, stores it under `raw/` with source frontmatter (`source_url`, `ingested`, `sha256`), and produces/updates entity and concept pages
+- [x] **PIPE-02**: The pipeline skips unchanged sources (sha256 match) and flags changed ones for re-ingestion (source drift)
+- [x] **PIPE-03**: Pages are created only above thresholds (entity/concept appears in 2+ sources or is central to one); passing mentions never create pages
+- [x] **PIPE-04**: Near-duplicate entities are prevented by an entity registry with aliases and resolve-before-create matching
+- [x] **PIPE-05**: Generated pages carry provenance (sources frontmatter, `^[raw/...]` markers on multi-source claims) and optional `confidence`/`contested` flags; contradictions are flagged, never auto-resolved
+- [x] **PIPE-06**: Every generated page passes a deterministic write-path validator (link whitelist from index, frontmatter schema, provenance present) before it reaches disk — the LLM never writes to the vault directly
 
 ### LLM Provider
 
@@ -112,12 +112,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LLMP-01 | Phase 2 | Complete |
 | LLMP-02 | Phase 2 | Complete |
 | SRCC-03 | Phase 2 | Complete |
-| PIPE-01 | Phase 3 | Pending |
-| PIPE-02 | Phase 3 | Pending |
-| PIPE-03 | Phase 3 | Pending |
-| PIPE-04 | Phase 3 | Pending |
-| PIPE-05 | Phase 3 | Pending |
-| PIPE-06 | Phase 3 | Pending |
+| PIPE-01 | Phase 3 | Complete |
+| PIPE-02 | Phase 3 | Complete |
+| PIPE-03 | Phase 3 | Complete |
+| PIPE-04 | Phase 3 | Complete |
+| PIPE-05 | Phase 3 | Complete |
+| PIPE-06 | Phase 3 | Complete |
 | SRCC-01 | Phase 4 | Pending |
 | SRCC-02 | Phase 4 | Pending |
 | LINT-01 | Phase 5 | Pending |

@@ -18,12 +18,12 @@ Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-d
 
 - [x] Rust workspace: `saussunet-core` (lib) + standalone web binary; MoriNet can depend on the lib later — Validated in Phase 1 (zero-axum core enforced by CI guard, sqlx 0.8 pinned for MoriNet interop)
 - [x] Abstract LLM provider: local (Strix Halo / ROCm) or cloud API, interchangeable — Validated in Phase 2 (`LlmProvider` trait + `MockProvider` + `OpenAiCompat`, live-proven against a real OpenAI-compatible endpoint; durable SQLite job queue with atomic claim/retry/reap)
+- [x] Ingestion pipeline: sources → extraction/linking → llm-wiki notes (SCHEMA, index, log, wikilinks, frontmatter) — Validated in Phase 3 (URL + PDF ingestion, sha256 no-op/drift, threshold gate, entity-registry dedup, provenance + contested flags, deterministic write-path validator; 214 tests green, phase acceptance sc1–sc5)
 
 ### Active
 
 <!-- Starting hypotheses, validated by shipping. -->
 
-- [ ] Ingestion pipeline: sources → extraction/linking → llm-wiki notes (SCHEMA, index, log, wikilinks, frontmatter)
 - [ ] File sources: Google Drive, WebDAV, documents (PDF/web) — poll/continuous watch
 - [ ] Inbound MCP sources: the vault stores only **pointer notes** (access-point address), content read live via stream on demand
 - [ ] Outbound MCP exposure: the vault served over MCP for external agent reading
@@ -92,4 +92,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-26 — Phase 2 (LLM Provider + Durable Job Queue) complete: 121 tests green, live endpoint validated*
+*Last updated: 2026-10-30 — Phase 3 (Extraction Pipeline) complete: 214 tests green, URL+PDF end-to-end ingestion with validator-gated writes*
