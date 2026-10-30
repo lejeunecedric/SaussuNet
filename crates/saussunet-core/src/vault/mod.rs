@@ -10,6 +10,7 @@ pub mod frontmatter;
 pub mod ghash;
 pub mod index;
 pub mod log;
+pub mod raw;
 pub mod schema;
 pub mod writer;
 

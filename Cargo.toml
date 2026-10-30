@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 # PATTERNS §3). saussunet-core must never add axum/HTTP deps (Anti-Pattern 1;
 # guarded by scripts/check.sh).
 [workspace.dependencies]
-tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "fs", "sync", "time", "signal"] }
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "fs", "sync", "time", "signal", "net"] }
 # Pinned 0.8, NOT STACK's 0.9: MoriNet's Cargo.lock pins sqlx 0.8.6 and two
 # sqlx majors cannot coexist in one binary; QUAL-05 (saussunet-core embedded in
 # MoriNet) is the binding future constraint. See SKELETON.md "Architectural
@@ -42,6 +42,12 @@ pulldown-cmark = "0.13"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tempfile = "3"
+# Phase 3 pipeline (D-05): URL parsing, article extraction, HTML→Markdown.
+# `readability` was flagged dormant in STACK.md, but 03-CONTEXT D-05 locks the
+# choice — pinned to the latest published stable (0.3).
+url = "2"
+readability = "0.3"
+htmd = "0.1"
 
 [profile.release]
 opt-level = 3

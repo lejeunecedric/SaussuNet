@@ -24,6 +24,9 @@ pulldown-cmark = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 async-trait = { workspace = true }
+url = { workspace = true }
+readability = { workspace = true }
+htmd = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

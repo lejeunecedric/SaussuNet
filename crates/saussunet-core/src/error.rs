@@ -43,6 +43,16 @@ pub enum CoreError {
 
     #[error("queue error: {0}")]
     Queue(String),
+
+    // Phase 3 (PIPE-01): fetch/extraction errors. Like `Llm`, these carry
+    // ONLY pre-sanitized strings — URLs stored here must already have had
+    // userinfo stripped (D-03 pattern: nothing secret may ride Display into
+    // logs).
+    #[error("fetch error for {url}: {reason}")]
+    Fetch { url: String, reason: String },
+
+    #[error("blocked URL {url}: {reason}")]
+    BlockedUrl { url: String, reason: String },
 }
 
 /// Convenience alias used across the core crate (never `anyhow` in the lib).
