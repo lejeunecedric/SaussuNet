@@ -18,6 +18,8 @@ pub struct FileConfig {
     pub vault: VaultSection,
     #[serde(default)]
     pub llm: LlmSection,
+    #[serde(default)]
+    pub pipeline: PipelineSection,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -26,6 +28,10 @@ pub struct ServerSection {
     /// Phase 5 UI cannot accidentally inherit 0.0.0.0 (T-01-02).
     #[serde(default = "default_bind")]
     pub bind: String,
+    /// D-13: every HTTP route is nested under this base path from day one.
+    /// Normalized at resolve time (leading `/`, no trailing `/`).
+    #[serde(default = "default_base_path")]
+    pub base_path: String,
 }
 
 // Manual Default impls: a derived Default would return empty strings and
@@ -90,10 +96,26 @@ pub struct LlmSection {
     pub timeout_secs: u64,
 }
 
+/// Extraction-pipeline thresholds (D-14). Every field has a sane default so
+/// the section may be absent entirely.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PipelineSection {
+    /// D-14: minimum distinct sources before a page may be created.
+    #[serde(default = "default_min_sources")]
+    pub min_sources: u32,
+    /// Upload size cap for the future PDF route (25 MiB default).
+    #[serde(default = "default_max_upload_bytes")]
+    pub max_upload_bytes: u64,
+    /// Fetch size cap for URL ingestion (5 MiB default).
+    #[serde(default = "default_max_fetch_bytes")]
+    pub max_fetch_bytes: u64,
+}
+
 impl Default for ServerSection {
     fn default() -> Self {
         Self {
             bind: default_bind(),
+            base_path: default_base_path(),
         }
     }
 }
@@ -124,6 +146,16 @@ impl Default for LlmSection {
             api_key: None,
             max_concurrency: default_max_concurrency(),
             timeout_secs: default_timeout_secs(),
+        }
+    }
+}
+
+impl Default for PipelineSection {
+    fn default() -> Self {
+        Self {
+            min_sources: default_min_sources(),
+            max_upload_bytes: default_max_upload_bytes(),
+            max_fetch_bytes: default_max_fetch_bytes(),
         }
     }
 }
@@ -164,6 +196,32 @@ fn default_timeout_secs() -> u64 {
     300
 }
 
+fn default_base_path() -> String {
+    "/saussunet".to_string()
+}
+
+fn default_min_sources() -> u32 {
+    2
+}
+
+fn default_max_upload_bytes() -> u64 {
+    26_214_400
+}
+
+fn default_max_fetch_bytes() -> u64 {
+    5_242_880
+}
+
+/// D-13: normalize a configured base path to `/<segments>` — leading slash,
+/// no trailing slash. An empty/blank result falls back to the default.
+fn normalize_base_path(s: &str) -> String {
+    let trimmed = s.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return default_base_path();
+    }
+    format!("/{trimmed}")
+}
+
 /// Env var that overrides `[llm].api_key` (D-03).
 const ENV_LLM_API_KEY: &str = "SAUSSUNET_LLM__API_KEY";
 
@@ -175,6 +233,8 @@ pub struct RuntimeConfig {
     /// `data/vaults/<vault_id>/` — paths keyed by vault id (D-04).
     pub vault_root: PathBuf,
     pub bind: String,
+    /// D-13: normalized base path every HTTP route nests under (e.g. `/saussunet`).
+    pub base_path: String,
     pub vault_id: i64,
     pub vault_name: String,
     /// Resolved `[llm]` section (D-02/D-03/D-04). `Debug` is safe: the api_key
@@ -185,6 +245,10 @@ pub struct RuntimeConfig {
     pub llm_api_key: Option<SecretString>,
     pub llm_max_concurrency: usize,
     pub llm_timeout_secs: u64,
+    /// Resolved `[pipeline]` thresholds (D-14).
+    pub pipeline_min_sources: u32,
+    pub pipeline_max_upload_bytes: u64,
+    pub pipeline_max_fetch_bytes: u64,
 }
 
 impl FileConfig {
@@ -215,6 +279,7 @@ impl FileConfig {
             db_path: data_dir.join("saussunet.db"),
             vault_root: data_dir.join("vaults").join(self.vault.id.to_string()),
             bind: self.server.bind.clone(),
+            base_path: normalize_base_path(&self.server.base_path),
             vault_id: self.vault.id,
             vault_name: self.vault.name.clone(),
             llm_provider: self.llm.provider.clone(),
@@ -223,6 +288,9 @@ impl FileConfig {
             llm_api_key,
             llm_max_concurrency: self.llm.max_concurrency,
             llm_timeout_secs: self.llm.timeout_secs,
+            pipeline_min_sources: self.pipeline.min_sources,
+            pipeline_max_upload_bytes: self.pipeline.max_upload_bytes,
+            pipeline_max_fetch_bytes: self.pipeline.max_fetch_bytes,
         })
     }
 }
@@ -415,5 +483,62 @@ mod tests {
         );
         // The section itself is equally safe.
         assert!(!format!("{:?}", cfg.llm).contains("test-pass-9f3a"));
+    }
+
+    #[test]
+    fn bare_server_section_gets_base_path_default() {
+        // D-13: base_path rides [server]; a bare section must still load.
+        let cfg: FileConfig = toml::from_str("[server]\n").expect("bare [server] must parse");
+        assert_eq!(cfg.server.base_path, "/saussunet");
+    }
+
+    #[test]
+    fn bare_pipeline_section_parses_with_defaults() {
+        let cfg: FileConfig = toml::from_str("[pipeline]\n").expect("bare [pipeline] must parse");
+        assert_eq!(cfg.pipeline.min_sources, 2);
+        assert_eq!(cfg.pipeline.max_upload_bytes, 26_214_400);
+        assert_eq!(cfg.pipeline.max_fetch_bytes, 5_242_880);
+    }
+
+    #[test]
+    fn absent_pipeline_section_gets_sane_defaults() {
+        // D-14: sane defaults when the section is absent entirely.
+        let cfg: FileConfig = toml::from_str("").expect("empty TOML must parse");
+        assert_eq!(cfg.pipeline.min_sources, 2);
+        let rt = cfg.resolve().expect("resolve");
+        assert_eq!(rt.base_path, "/saussunet");
+        assert_eq!(rt.pipeline_min_sources, 2);
+        assert_eq!(rt.pipeline_max_upload_bytes, 26_214_400);
+        assert_eq!(rt.pipeline_max_fetch_bytes, 5_242_880);
+    }
+
+    #[test]
+    fn full_pipeline_section_resolves() {
+        let cfg: FileConfig = toml::from_str(
+            "[pipeline]\nmin_sources = 5\nmax_upload_bytes = 1024\nmax_fetch_bytes = 512\n",
+        )
+        .expect("full [pipeline] must parse");
+        let rt = cfg.resolve().expect("resolve");
+        assert_eq!(rt.pipeline_min_sources, 5);
+        assert_eq!(rt.pipeline_max_upload_bytes, 1024);
+        assert_eq!(rt.pipeline_max_fetch_bytes, 512);
+    }
+
+    #[test]
+    fn base_path_normalization() {
+        // D-13: leading slash, no trailing slash; empty/blank falls back to default.
+        let cases = [
+            ("", "/saussunet"),
+            ("saussunet", "/saussunet"),
+            ("/x/", "/x"),
+            ("/", "/saussunet"),
+            ("/ui/app/", "/ui/app"),
+        ];
+        for (input, expected) in cases {
+            let cfg: FileConfig =
+                toml::from_str(&format!("[server]\nbase_path = \"{input}\"\n")).expect("parses");
+            let rt = cfg.resolve().expect("resolve");
+            assert_eq!(rt.base_path, expected, "base_path {input:?} must normalize");
+        }
     }
 }

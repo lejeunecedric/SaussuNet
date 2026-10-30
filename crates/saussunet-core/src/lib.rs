@@ -137,6 +137,9 @@ pub fn default_config() -> &'static str {
 [server]
 # Phase 1 opens no listener; the default is pinned to localhost (INFR-02, T-01-02).
 bind = "127.0.0.1:8080"
+# All HTTP routes are nested under this base path (D-13). Normalized at
+# resolve time: leading slash, no trailing slash.
+base_path = "/saussunet"
 
 [storage]
 # Data root: holds saussunet.db and vaults/<id>/. Must never live inside a
@@ -162,6 +165,15 @@ provider = "mock"
 # Worker-pool bound; 1 is safe for a local iGPU LLM (D-04).
 # max_concurrency = 1
 # timeout_secs = 300
+
+[pipeline]
+# Extraction-pipeline thresholds (D-14). Sane defaults apply when this
+# section is absent entirely.
+min_sources = 2
+# Upload cap for the PDF ingest route (25 MiB).
+max_upload_bytes = 26214400
+# Fetch cap for URL ingestion (5 MiB).
+max_fetch_bytes = 5242880
 "#
 }
 

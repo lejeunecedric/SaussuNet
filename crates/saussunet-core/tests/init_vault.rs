@@ -234,6 +234,7 @@ async fn boot_refuses_db_inside_vault_root() {
         db_path: vault_root.join("saussunet.db"),
         vault_root: vault_root.clone(),
         bind: "127.0.0.1:8080".to_string(),
+        base_path: "/saussunet".to_string(),
         vault_id: 1,
         vault_name: "main".to_string(),
         llm_provider: "mock".to_string(),
@@ -242,6 +243,9 @@ async fn boot_refuses_db_inside_vault_root() {
         llm_api_key: None,
         llm_max_concurrency: 1,
         llm_timeout_secs: 300,
+        pipeline_min_sources: 2,
+        pipeline_max_upload_bytes: 26_214_400,
+        pipeline_max_fetch_bytes: 5_242_880,
     };
     let err = boot(&rt).await.expect_err("must refuse db inside vault");
     assert!(err.to_string().contains("T-01-01"), "error: {err}");
