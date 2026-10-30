@@ -134,15 +134,14 @@ async fn ingest_url_job_lands_raw_file_and_sync_state() {
     assert!(content.contains(&format!("sha256: {}", sha256_hex(MARKDOWN.as_bytes()))));
     assert!(content.ends_with(MARKDOWN), "exact body: {content}");
 
-    // D-08 groundwork: sync_state carries the source sha256 (placeholder in
-    // the token column until 03-03 migration 0007 — see pipeline/mod.rs).
-    let ss = store
-        .get_sync_state(vault_id, url)
-        .await
-        .expect("get_sync_state")
-        .expect("sync_state row");
+    // D-08: sync_state carries the source sha256 in its own column
+    // (migration 0007 — replaces the 03-01 token-column placeholder).
     assert_eq!(
-        ss.token.as_deref(),
+        store
+            .get_source_sha256(vault_id, url)
+            .await
+            .expect("get_source_sha256")
+            .as_deref(),
         Some(sha256_hex(MARKDOWN.as_bytes()).as_str())
     );
 

@@ -9,6 +9,8 @@
 
 pub mod extract;
 pub mod fetch;
+pub mod prompts;
+pub mod schemas;
 
 use std::sync::Arc;
 
@@ -144,18 +146,11 @@ async fn ingest_url(
         result.markdown.as_bytes(),
     )
     .await?;
-    // D-08 groundwork. DOCUMENTED PLACEHOLDER (plan 03-01 Task 2 note): the
-    // digest rides the `token` column until plan 03-03 migration 0007 adds a
-    // dedicated `sha256` column and moves this write.
+    // D-08: the digest lands in its own sync_state.sha256 column
+    // (migration 0007 — 03-01's `token` placeholder is retired; the
+    // migration backfilled any rows written before this change).
     store
-        .upsert_sync_state(
-            vault.id,
-            &source_id,
-            Some(&result.sha256),
-            None,
-            Some(&Utc::now().to_rfc3339()),
-            None,
-        )
+        .set_source_sha256(vault.id, &source_id, &result.sha256)
         .await?;
     run_extraction_passes(store, vault, provider, &raw_path, &result).await
 }
