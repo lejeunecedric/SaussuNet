@@ -53,6 +53,12 @@ pub enum CoreError {
 
     #[error("blocked URL {url}: {reason}")]
     BlockedUrl { url: String, reason: String },
+
+    // Phase 3 (PIPE-06): deterministic write-path validator rejection. Carries
+    // the joined rule-violation list — rule names + offending targets only,
+    // never the page body (a poisoned page may contain attacker text, D-03).
+    #[error("validation rejected: {0}")]
+    Validation(String),
 }
 
 /// Convenience alias used across the core crate (never `anyhow` in the lib).

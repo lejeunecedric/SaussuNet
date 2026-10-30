@@ -12,6 +12,7 @@ pub mod index;
 pub mod log;
 pub mod raw;
 pub mod schema;
+pub mod validate;
 pub mod writer;
 
 use std::ffi::OsString;
