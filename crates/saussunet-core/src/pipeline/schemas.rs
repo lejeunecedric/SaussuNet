@@ -4,12 +4,12 @@
 //! `#[serde(default)]`, unknown fields are ignored, and there is deliberately
 //! NO `deny_unknown_fields` — a chatty model still yields usable output.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Pass-1 candidate kind. Unknown strings fold to `Concept` (tolerant
 /// fallback via `#[serde(other)]`) — a mislabelled kind must never kill a
 /// whole extraction pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CandidateKind {
     Entity,
@@ -21,7 +21,7 @@ pub enum CandidateKind {
 /// One pass-1 candidate (D-09/D-10/D-16): name, kind, mention count, the
 /// LLM's centrality judgment + one-line justification, and alias variants
 /// found in the source.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Candidate {
     #[serde(default)]
     pub name: String,
@@ -38,7 +38,7 @@ pub struct Candidate {
 }
 
 /// Pass-1 output envelope.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExtractCandidates {
     #[serde(default)]
     pub candidates: Vec<Candidate>,
@@ -63,7 +63,7 @@ impl ExtractCandidates {
 
 /// One pass-2 page section (heading + markdown body carrying `^[raw/...]`
 /// provenance markers per claim, D-11).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Section {
     #[serde(default)]
     pub heading: String,
@@ -74,7 +74,7 @@ pub struct Section {
 /// Pass-2 output: full page content for one threshold-passing page
 /// (D-09/D-11/D-12). `contested` + `contradictions` implement the
 /// never-auto-resolve contradiction rule.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PageContent {
     #[serde(default)]
     pub title: String,

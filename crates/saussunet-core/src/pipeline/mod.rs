@@ -9,6 +9,7 @@
 
 pub mod extract;
 pub mod fetch;
+pub mod pages;
 pub mod prompts;
 pub mod schemas;
 
@@ -19,7 +20,7 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use crate::error::{CoreError, Result};
-use crate::llm::LlmProvider;
+use crate::llm::{generate_json_typed, LlmProvider};
 use crate::store::{Job, Store};
 use crate::vault::{self, Vault};
 
@@ -152,18 +153,88 @@ async fn ingest_url(
     store
         .set_source_sha256(vault.id, &source_id, &result.sha256)
         .await?;
-    run_extraction_passes(store, vault, provider, &raw_path, &result).await
+    run_extraction_passes(store, vault, provider, &raw_path, &source_id, &result).await
 }
 
-/// TODO(03-03): two-pass LLM extraction seam (D-09: pass 1 candidates,
-/// pass 2 page generation/merge). No-op in the 03-01 walking skeleton.
+/// Page-creation threshold default (D-14): "2+ sources". The resolved
+/// `RuntimeConfig.pipeline_min_sources` lands here once the queue handler
+/// signature carries config; `pages::gate_and_write` takes the value as a
+/// parameter so plumbing it is a one-line change at the call below.
+pub const DEFAULT_MIN_SOURCES: u32 = 2;
+
+/// D-09: the two LLM passes per source. Pass 1 extracts typed candidates
+/// (centrality + justification + aliases) seeing the registry index;
+/// `pages::gate_and_write` applies the threshold and runs pass 2 per
+/// eligible page (existing page + new evidence → merged content). A pass-1
+/// failure propagates — the queue retry ladder re-runs the whole source
+/// (D-02), which is safe: raw write is same-day overwrite and source-set
+/// inserts are idempotent.
 async fn run_extraction_passes(
-    _store: &Store,
-    _vault: &Arc<Vault>,
-    _provider: &Arc<dyn LlmProvider>,
-    _raw_path: &std::path::Path,
-    _fetched: &fetch::FetchResult,
+    store: &Store,
+    vault: &Arc<Vault>,
+    provider: &Arc<dyn LlmProvider>,
+    raw_path: &std::path::Path,
+    source_id: &str,
+    fetched: &fetch::FetchResult,
 ) -> Result<()> {
+    // Provenance + sources frontmatter use the vault-relative raw path.
+    let raw_rel = raw_path
+        .strip_prefix(&vault.root)
+        .unwrap_or(raw_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    // Registry index for pass 1 (D-15/D-16): canonical names + aliases, so
+    // the LLM reuses existing names instead of minting near-duplicates.
+    let registry_index = if let Ok(entities) = store.list_entities(vault.id).await {
+        if entities.is_empty() {
+            "(none yet)".to_string()
+        } else {
+            entities
+                .iter()
+                .map(|e| {
+                    let aliases: Vec<String> =
+                        serde_json::from_str(&e.aliases_json).unwrap_or_default();
+                    if aliases.is_empty() {
+                        format!("- {}", e.canonical_name)
+                    } else {
+                        format!("- {} (aliases: {})", e.canonical_name, aliases.join(", "))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    } else {
+        "(registry unavailable)".to_string()
+    };
+
+    let prompt = prompts::pass1_prompt(&raw_rel, &fetched.markdown, &registry_index);
+    tracing::debug!(
+        "pipeline pass-1 prompt: {}",
+        prompt.chars().take(400).collect::<String>()
+    );
+    let pass1: schemas::ExtractCandidates = generate_json_typed(
+        provider.as_ref(),
+        &prompt,
+        &schemas::ExtractCandidates::json_schema_hint(),
+    )
+    .await?;
+    tracing::debug!(
+        "pipeline pass-1 output: {} candidates",
+        pass1.candidates.len()
+    );
+
+    pages::gate_and_write(
+        store,
+        vault,
+        provider,
+        DEFAULT_MIN_SOURCES,
+        &raw_rel,
+        source_id,
+        &fetched.markdown,
+        &pass1,
+    )
+    .await?;
     Ok(())
 }
 

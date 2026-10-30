@@ -107,9 +107,13 @@ async fn ingest_url_job_lands_raw_file_and_sync_state() {
         .await
         .expect("insert_job");
 
+    // 03-03: the extraction passes now run inside the handler — script an
+    // empty candidate list so this test stays focused on raw/ + sync_state.
     let handles = spawn_workers(
         Arc::clone(&store),
-        Arc::new(MockProvider::new(vec![])),
+        Arc::new(MockProvider::new(vec![saussunet_core::llm::Scripted::Ok(
+            serde_json::json!({ "candidates": [] }),
+        )])),
         Arc::clone(&vault),
         vault_id,
         fast_cfg(),
