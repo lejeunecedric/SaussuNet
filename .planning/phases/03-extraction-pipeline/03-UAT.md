@@ -1,18 +1,14 @@
 ---
-status: diagnosed
+status: complete
 phase: 03-extraction-pipeline
 source: 03-01-SUMMARY.md, 03-02-SUMMARY.md, 03-03-SUMMARY.md, 03-04-SUMMARY.md, 03-05-SUMMARY.md, 03-06-SUMMARY.md, 03-07-SUMMARY.md, 03-08-SUMMARY.md
 started: 2026-10-30T22:44:44Z
-updated: 2026-10-30T23:08:01Z
+updated: 2026-10-30T23:49:23Z
 ---
 
 ## Current Test
 
-number: 9
-name: Live page generation (pass-2 merge path writes a real page)
-expected: |
-  Ingesting a content-rich URL produces entity/concept pages under entities/ or concepts/, an index.md entry, and a log.md create entry.
-awaiting: user response
+[testing complete]
 
 ## Tests
 
@@ -58,15 +54,14 @@ reason: needs a public URL whose content changes between fetches; none reliable 
 
 ### 9. Live page generation (pass-2 merge path writes a real page)
 expected: a content-rich URL produces pages under entities/ or concepts/ + index.md + log.md create entries
-result: issue
-reported: "Local Halogen model (halogen-qwen3.8-flash-next) hangs >300s on pass-1 prompts for substantial pages (~8KB+ markdown): job 2 (Rust blog, dead after 4 attempts), job 7 (serde.rs, failing retries). A standalone repro with the exact pass1_prompt never completed in 573s (killed). Small pages work (example.com done; cargo doc page done but model returned no central candidates so gating correctly wrote zero pages). Page-write path itself is covered by automated tests (03-06 validator, phase3_acceptance sc1-sc5)."
-severity: minor
+result: pass
+note: initially failed; diagnosed and fixed with 3 commits, then re-run live: serde.rs ingest wrote 8 pages (entities/serde.md, rust.md, cargo.md + 5 concepts) with valid provenance markers, gen_hash, index.md entries, and log.md create entries. Fixes: (a) 05c98d8 chat_template_kwargs enable_thinking=false — Halogen xhigh thinking took ~410-467s, past the 300s client timeout; (b) 62eeb11 prompt templates emitted doubled ^[raw/raw/...] markers the PIPE-06 validator rejected (13/13 pages; unit test masked it by accepting both forms); (c) e803e36 deterministic Related floor — small models ignore the >=2-wikilinks instruction, validator rejected every page.
 
 ## Summary
 
 total: 9
-passed: 7
-issues: 1
+passed: 8
+issues: 0
 pending: 0
 skipped: 1
 blocked: 0
@@ -74,7 +69,8 @@ blocked: 0
 ## Gaps
 
 - truth: "Ingesting a content-rich URL produces entity/concept pages via the live LLM path"
-  status: failed
+  status: resolved
+  resolution: "Fixed in 05c98d8 (thinking disabled best-effort), 62eeb11 (single raw/ marker), e803e36 (wikilink Related floor); live re-run wrote 8 valid pages"
   reason: "User reported: local Halogen endpoint times out (>300s) on pass-1 prompts for substantial pages; repro with exact pass1_prompt never completed in 573s"
   severity: minor
   test: 9
