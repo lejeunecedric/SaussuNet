@@ -32,10 +32,13 @@ async fn setup() -> (TempDir, AppState) {
     let tmp = TempDir::new().expect("tempdir");
     let rt = rt_for(tmp.path(), "main");
     let (store, vault) = boot_open(&rt).await.expect("boot");
+    let vault_id = vault.id;
     let state = AppState {
         store: Arc::new(store),
-        vault_id: vault.id,
+        vault: Arc::new(vault),
+        vault_id,
         base_path: rt.base_path.clone(),
+        max_upload_bytes: rt.pipeline_max_upload_bytes,
     };
     (tmp, state)
 }

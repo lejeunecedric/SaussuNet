@@ -51,7 +51,7 @@ htmd = "0.1"
 # HTTP server for the daemon's ingest endpoint (Phase 3, D-01). BINARY CRATE
 # ONLY — saussunet-core must stay axum-free (Anti-Pattern 1; scripts/check.sh
 # greps core's Cargo.toml to enforce this).
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 
 [profile.release]
 opt-level = 3

@@ -138,8 +138,10 @@ async fn boot() -> anyhow::Result<()> {
     // worker drains the queue. Bind stays loopback by default (T-01-02).
     let http_state = http::AppState {
         store: store.clone(),
+        vault: vault.clone(),
         vault_id: rt.vault_id,
         base_path: rt.base_path.clone(),
+        max_upload_bytes: rt.pipeline_max_upload_bytes,
     };
     // WR-03: the default "mock" provider has an empty script — draining the
     // queue with it would fail and dead-letter every job invisibly. Skip
