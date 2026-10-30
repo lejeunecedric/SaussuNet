@@ -3,9 +3,12 @@
 //! `POST {base_url}/chat/completions` with bearer auth, non-streaming, and a
 //! reqwest client-level timeout so a hung endpoint can never pin a worker
 //! forever (D-04 resource bound). `response_format: {"type":"json_object"}`
-//! is requested best-effort: on HTTP 400 the SAME request is retried once
-//! without it — local llama.cpp/Ollama reject the field, and the trait-level
-//! tolerant parse (D-05) makes their output work identically to cloud.
+//! and `chat_template_kwargs: {"enable_thinking": false}` are requested
+//! best-effort: on HTTP 400 the SAME request is retried with the newer field
+//! dropped first, then the older one — local llama.cpp/Ollama reject
+//! `response_format`, and thinking-heavy servers (Halogen xhigh default)
+//! otherwise reason for minutes past the timeout. The trait-level tolerant
+//! parse (D-05) makes their output work identically to cloud.
 //!
 //! D-03 secrecy: the api_key is revealed only into the bearer header at send
 //! time. It appears in NO error (non-2xx errors carry status + url only —
@@ -69,12 +72,16 @@ impl OpenAiCompat {
     }
 
     /// One POST attempt. `with_response_format` toggles the D-05 best-effort
-    /// `response_format` flag (400 → caller retries once without it).
+    /// `response_format` flag; `with_chat_template_kwargs` toggles the UAT-03
+    /// best-effort `chat_template_kwargs: {enable_thinking: false}` (thinking-
+    /// heavy local servers spend minutes reasoning before answering; disabling
+    /// it keeps calls inside the client timeout).
     async fn post_chat(
         &self,
         url: &str,
         prompt: &str,
         with_response_format: bool,
+        with_chat_template_kwargs: bool,
     ) -> std::result::Result<reqwest::Response, reqwest::Error> {
         let mut body = json!({
             "model": self.model,
@@ -83,6 +90,9 @@ impl OpenAiCompat {
         });
         if with_response_format {
             body["response_format"] = json!({ "type": "json_object" });
+        }
+        if with_chat_template_kwargs {
+            body["chat_template_kwargs"] = json!({ "enable_thinking": false });
         }
         self.client
             .post(url)
@@ -99,18 +109,29 @@ impl LlmProvider for OpenAiCompat {
         let url = format!("{}/chat/completions", self.base_url);
 
         let mut resp = self
-            .post_chat(&url, prompt, true)
+            .post_chat(&url, prompt, true, true)
             .await
             .map_err(|e| CoreError::Llm {
                 status: 0,
                 url: format!("{url}: {e}"),
             })?;
 
-        // D-05 best-effort flag: endpoints that reject response_format with 400
-        // (llama.cpp, some Ollama builds) get the SAME request once without it.
+        // Best-effort field ladder: endpoints answer 400 when they do not
+        // understand a field. Drop `chat_template_kwargs` first (newer,
+        // vLLM-specific), then `response_format` (D-05: llama.cpp, some Ollama
+        // builds) — each time replaying the SAME request minus that field.
         if resp.status() == reqwest::StatusCode::BAD_REQUEST {
             resp = self
-                .post_chat(&url, prompt, false)
+                .post_chat(&url, prompt, true, false)
+                .await
+                .map_err(|e| CoreError::Llm {
+                    status: 0,
+                    url: format!("{url}: {e}"),
+                })?;
+        }
+        if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+            resp = self
+                .post_chat(&url, prompt, false, false)
                 .await
                 .map_err(|e| CoreError::Llm {
                     status: 0,
