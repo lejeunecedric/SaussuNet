@@ -68,7 +68,14 @@ Decimal phases appear between their surrounding integers in numeric order.
   1. User configures a WebDAV folder as a watched source; new, changed, and removed files are detected on the poll interval (etag/size, Depth:1 walk with a depth cap) and ingestion jobs are enqueued automatically
   2. Watcher state (etags, pageTokens, last-check) persists in SQLite: restarting the server resumes watching with no full re-scan
   3. Re-polling a folder of unchanged files enqueues nothing (sha256-gated enqueue)
-**Plans**: TBD
+**Plans**:
+  - [ ] 04-01: `[[watch]]` config surface — parse/resolve/validation + SecretString secrecy (tdd, wave 1) → SRCC-01, T12/T13
+  - [ ] 04-02: migration 0009 `watch_state` + narrower sync_state writers (execute, wave 1) → SRCC-02, T16
+  - [ ] 04-03: pure watch logic — multistatus parser + diff classifier (tdd, wave 2) → SRCC-01/02, T14
+  - [ ] 04-04: walking skeleton — DavClient + poll_once + `ingest_raw` + stub server (execute, wave 3) → SRCC-01/02, T1/T11a/T15
+  - [ ] 04-05: full walk — depth cap, removals, sha256 gate, failure bookkeeping (execute, wave 4) → SRCC-01/02, T2/T3/T4/T7/T9/T10/T11b
+  - [ ] 04-06: daemon lifecycle — interval loop + restart-resume proof (execute, wave 5) → SRCC-01/02, T5/T6
+  - [ ] 04-07: opportunistic RFC 6578 sync-collection — pageTokens (execute, wave 6) → SRCC-02, T8
 
 ### Phase 5: Health Lint + Review & Monitoring UI
 **Goal:** The human is the guardrail: lint runs after every batch, destructive changes wait in a review queue with diffs, and everything is configured and monitored from the web UI.
