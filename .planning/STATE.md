@@ -42,10 +42,10 @@ Single-writer vault layer, atomic writes, `gen_hash` edit protection, and the mu
 
 | Phase | Status | Key Outcomes |
 |-------|--------|--------------|
-| 1. Workspace Foundations + Vault Writer | Not started | — |
-| 2. LLM Provider + Durable Job Queue | Not started | — |
-| 3. Extraction Pipeline | Not started | — |
-| 4. Continuous Source Watching | Not started | — |
+| 1. Workspace Foundations + Vault Writer | Complete | — |
+| 2. LLM Provider + Durable Job Queue | Complete | — |
+| 3. Extraction Pipeline | Complete | 8 plans; 214+ tests; UAT 8/9 pass live; 3 live-UAT fixes (thinking-off, raw/ marker, wikilink floor) |
+| 4. Continuous Source Watching | Planned | 7 plans (waves 1–6), checker passed, validation signed off 2026-11-01 |
 | 5. Health Lint + Review & Monitoring UI | Not started | — |
 | 6. Exposure + Deployment | Not started | — |
 
