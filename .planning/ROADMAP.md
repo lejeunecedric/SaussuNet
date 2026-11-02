@@ -75,7 +75,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   - [x] 04-04: walking skeleton — DavClient + poll_once + `ingest_raw` + stub server (execute, wave 3) → SRCC-01/02, T1/T11a/T15
   - [x] 04-05: full walk — depth cap, removals, sha256 gate, failure bookkeeping (execute, wave 4) → SRCC-01/02, T2/T3/T4/T7/T9/T10/T11b
   - [x] 04-06: daemon lifecycle — interval loop + restart-resume proof (execute, wave 5) → SRCC-01/02, T5/T6
-  - [ ] 04-07: opportunistic RFC 6578 sync-collection — pageTokens (execute, wave 6) → SRCC-02, T8
+  - [x] 04-07: opportunistic RFC 6578 sync-collection — pageTokens (execute, wave 6) → SRCC-02, T8
 
 ### Phase 5: Health Lint + Review & Monitoring UI
 **Goal:** The human is the guardrail: lint runs after every batch, destructive changes wait in a review queue with diffs, and everything is configured and monitored from the web UI.
@@ -111,6 +111,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 1. Workspace Foundations + Vault Writer | 4/4 | Complete    | 2026-10-25 |
 | 2. LLM Provider + Durable Job Queue | 5/5 | Complete   | 2026-10-26 |
 | 3. Extraction Pipeline | 8/8 | Complete   | 2026-10-30 |
-| 4. Continuous Source Watching | 6/7 | In Progress|  |
+| 4. Continuous Source Watching | 7/7 | In Progress|  |
 | 5. Health Lint + Review & Monitoring UI | 0/? | Not started | - |
 | 6. Exposure + Deployment | 0/? | Not started | - |
