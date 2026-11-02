@@ -97,7 +97,7 @@ async fn poll_inner(
                         format!("{rel}/{}", e.path)
                     };
                     if e.is_collection
-                        && depth + 1 <= src.depth_cap as usize
+                        && depth < src.depth_cap as usize
                         && visited.insert(path.clone())
                     {
                         queue.push_back((path.clone(), depth + 1));
@@ -203,11 +203,8 @@ async fn poll_inner(
                 // already dropped anything outside the allowlist (Skipped), so the
                 // else branch only fires for custom allowlist entries (no job).
                 if ext == "md" || ext == "txt" {
-                    let source_hint = format!(
-                        "{}/{}",
-                        src.url.as_str().trim_end_matches('/'),
-                        entry.path
-                    );
+                    let source_hint =
+                        format!("{}/{}", src.url.as_str().trim_end_matches('/'), entry.path);
                     pipeline::submit_raw(
                         store,
                         vault,
@@ -283,10 +280,7 @@ async fn poll_inner(
     // log.md discipline: ONE append_entry call per poll, only when something
     // happened — a no-op poll is completely silent (T9).
     if !lines.is_empty() {
-        let header = format!(
-            "## [{}] update | Watch",
-            Utc::now().format("%Y-%m-%d")
-        );
+        let header = format!("## [{}] update | Watch", Utc::now().format("%Y-%m-%d"));
         vault::log::append_entry(vault, &header, &lines).await?;
     }
 
@@ -299,5 +293,5 @@ async fn poll_inner(
 /// Log/state-line injection guard: untrusted server paths (and error text
 /// built from them) must never carry a newline into log.md or last_error.
 fn sanitize_line(s: &str) -> String {
-    s.replace('\r', " ").replace('\n', " ")
+    s.replace(['\r', '\n'], " ")
 }

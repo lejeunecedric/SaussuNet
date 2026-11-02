@@ -36,6 +36,9 @@ pub struct StubHandle {
     /// 04-07 knob (unused in 04-04): flip to make POST answer 207 instead of
     /// the D-05 fallback 400.
     sync_mode: Arc<AtomicBool>,
+    /// 04-05 knob: when set, the NEXT PROPFIND answers 500 once (T7 walk
+    /// failure), then the flag clears itself.
+    fail_propfind: Arc<AtomicBool>,
 }
 
 impl StubHandle {
@@ -64,6 +67,10 @@ impl StubHandle {
     pub fn set_sync_mode(&self, on: bool) {
         self.sync_mode.store(on, Ordering::SeqCst);
     }
+    /// Make the next PROPFIND fail with 500 (one-shot).
+    pub fn fail_next_propfind(&self) {
+        self.fail_propfind.store(true, Ordering::SeqCst);
+    }
 }
 
 /// Start the stub; returns its base URL (`http://127.0.0.1:<port>/`) + handle.
@@ -73,7 +80,13 @@ pub fn stub_webdav() -> (String, StubHandle) {
     let tree: Arc<Mutex<HashMap<String, StubFile>>> = Arc::new(Mutex::new(HashMap::new()));
     let log: Arc<Mutex<ReqLog>> = Arc::new(Mutex::new(Vec::new()));
     let sync_mode = Arc::new(AtomicBool::new(false));
-    let (tree_t, log_t, sync_t) = (Arc::clone(&tree), Arc::clone(&log), Arc::clone(&sync_mode));
+    let fail_propfind = Arc::new(AtomicBool::new(false));
+    let (tree_t, log_t, sync_t, fail_t) = (
+        Arc::clone(&tree),
+        Arc::clone(&log),
+        Arc::clone(&sync_mode),
+        Arc::clone(&fail_propfind),
+    );
     std::thread::spawn(move || loop {
         let Ok((mut stream, _)) = listener.accept() else {
             break;
@@ -81,8 +94,9 @@ pub fn stub_webdav() -> (String, StubHandle) {
         let tree = Arc::clone(&tree_t);
         let log = Arc::clone(&log_t);
         let sync_mode = Arc::clone(&sync_t);
+        let fail_propfind = Arc::clone(&fail_t);
         std::thread::spawn(move || {
-            let _ = handle_conn(&mut stream, &tree, &log, &sync_mode);
+            let _ = handle_conn(&mut stream, &tree, &log, &sync_mode, &fail_propfind);
         });
     });
     (
@@ -91,6 +105,7 @@ pub fn stub_webdav() -> (String, StubHandle) {
             tree,
             log,
             sync_mode,
+            fail_propfind,
         },
     )
 }
@@ -100,6 +115,7 @@ fn handle_conn(
     tree: &Mutex<HashMap<String, StubFile>>,
     log: &Mutex<ReqLog>,
     sync_mode: &AtomicBool,
+    fail_propfind: &AtomicBool,
 ) -> std::io::Result<()> {
     // Read headers until \r\n\rn, then exactly Content-Length bytes.
     let mut buf = Vec::new();
@@ -145,7 +161,14 @@ fn handle_conn(
     ));
 
     let (status, headers, resp_body): (u16, Vec<String>, Vec<u8>) = match method.as_str() {
-        "PROPFIND" => propfind_response(tree, &raw_path, &path),
+        "PROPFIND" => {
+            if fail_propfind.swap(false, Ordering::SeqCst) {
+                // 04-05 T7: one-shot walk failure (DavClient requires 207).
+                (500, vec![], b"boom".to_vec())
+            } else {
+                propfind_response(tree, &raw_path, &path)
+            }
+        }
         "GET" => get_response(tree, &path),
         "POST" => {
             // D-05 fallback path: sync unsupported by default (04-07 flips
@@ -167,6 +190,7 @@ fn handle_conn(
         207 => "Multi-Status",
         400 => "Bad Request",
         404 => "Not Found",
+        500 => "Internal Server Error",
         _ => "Method Not Allowed",
     };
     let mut head_out = format!("HTTP/1.1 {status} {reason}\r\n");
@@ -659,7 +683,11 @@ async fn walk_depth_cap() {
         );
     }
     for (_, path, _, _) in &propfinds {
-        let levels = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).count();
+        let levels = path
+            .trim_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .count();
         assert!(
             levels <= 2,
             "no PROPFIND may target a path deeper than the cap: {path}"
@@ -719,18 +747,27 @@ async fn removed_file_logs_and_prunes_state() {
     );
 
     let log = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
-    assert!(
-        log.contains("removed: gone.md"),
-        "removal logged: {log}"
-    );
+    assert!(log.contains("removed: gone.md"), "removal logged: {log}");
     assert!(!log.contains("removed: keep.md"), "keep.md must survive");
 
-    let rows = store.list_watch_rows(vault_id, &src.source_id).await.unwrap();
-    assert!(!rows.iter().any(|r| r.path == "gone.md"), "state row pruned");
-    assert!(rows.iter().any(|r| r.path == "keep.md"), "keep.md row intact");
+    let rows = store
+        .list_watch_rows(vault_id, &src.source_id)
+        .await
+        .unwrap();
+    assert!(
+        !rows.iter().any(|r| r.path == "gone.md"),
+        "state row pruned"
+    );
+    assert!(
+        rows.iter().any(|r| r.path == "keep.md"),
+        "keep.md row intact"
+    );
 
     assert_eq!(snapshot_dir(&pages), pages_before, "vault pages untouched");
-    assert_eq!(store.list_jobs(vault_id, None).await.unwrap().len(), jobs_before);
+    assert_eq!(
+        store.list_jobs(vault_id, None).await.unwrap().len(),
+        jobs_before
+    );
 }
 
 /// T11b (D-08): a non-allowlisted extension is logged ONCE across polls —
@@ -763,8 +800,14 @@ async fn skipped_ext_logged_once_not_every_poll() {
     assert_eq!(store.list_jobs(vault_id, None).await.unwrap().len(), 1);
 
     // The marker row exists with sha256 NULL (it is the already-noted marker).
-    let rows = store.list_watch_rows(vault_id, &src.source_id).await.unwrap();
-    let docx = rows.iter().find(|r| r.path == "d.docx").expect("marker row");
+    let rows = store
+        .list_watch_rows(vault_id, &src.source_id)
+        .await
+        .unwrap();
+    let docx = rows
+        .iter()
+        .find(|r| r.path == "d.docx")
+        .expect("marker row");
     assert!(docx.sha256.is_none(), "skip marker carries no sha256");
 }
 
@@ -794,5 +837,227 @@ async fn log_injection_via_filename_is_neutralized() {
         saussunet_core::vault::log::entry_count(&log),
         base_count + 1,
         "exactly one Watch entry, no forged header"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 2 (04-05) — sha256 gate, failure bookkeeping, silent no-op
+// (T2, T7, T9, T10).
+// ---------------------------------------------------------------------------
+
+/// T2: changing bytes + etag on the stub re-enqueues the file and the log
+/// records a `changed:` line.
+#[tokio::test]
+async fn changed_file_reenqueues() {
+    let (base, stub) = stub_webdav();
+    stub.insert("note.md", b"v1 bytes", "\"e1\"");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("first poll"),
+        1
+    );
+
+    stub.insert("note.md", b"v2 bytes differ", "\"e2\"");
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("poll after change"),
+        1,
+        "changed bytes must re-enqueue"
+    );
+    assert_eq!(store.list_jobs(vault_id, None).await.unwrap().len(), 2);
+    let log = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
+    assert!(
+        log.contains("changed: note.md"),
+        "changed line logged: {log}"
+    );
+}
+
+/// T10 (D-07): rotating ONLY the etag (same bytes) enqueues nothing — the
+/// sha256 gate absorbs weak-etag churn — but the state row picks up the new
+/// etag with the sha256 unchanged.
+#[tokio::test]
+async fn weak_etag_same_bytes_no_enqueue() {
+    let (base, stub) = stub_webdav();
+    stub.insert("note.md", b"stable bytes", "\"e1\"");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("first poll"),
+        1
+    );
+    let sha_before = store
+        .list_watch_rows(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.path == "note.md")
+        .and_then(|r| r.sha256)
+        .expect("sha256 after first poll");
+
+    stub.set_etag("note.md", "W/\"e2\"");
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("poll after etag rotation"),
+        0,
+        "same bytes under a rotated etag must not enqueue"
+    );
+    assert_eq!(store.list_jobs(vault_id, None).await.unwrap().len(), 1);
+    let row = store
+        .list_watch_rows(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.path == "note.md")
+        .expect("row");
+    assert_eq!(row.etag.as_deref(), Some("W/\"e2\""), "fresh etag recorded");
+    assert_eq!(
+        row.sha256.as_deref(),
+        Some(sha_before.as_str()),
+        "sha256 unchanged"
+    );
+}
+
+/// T9 (D-11): re-polling a static tree is a NO-OP — zero jobs AND log.md
+/// byte-identical between polls (silent, DEBUG tracing only).
+#[tokio::test]
+async fn unchanged_poll_is_noop() {
+    let (base, stub) = stub_webdav();
+    stub.insert("a.md", b"a", "\"1\"");
+    stub.insert("papers/", b"", "");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("first poll"),
+        1
+    );
+    let log_before = std::fs::read(vault.root.join("log.md")).expect("log.md after poll 1");
+    let jobs_before = store.list_jobs(vault_id, None).await.unwrap().len();
+
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("second poll"),
+        0
+    );
+    assert_eq!(
+        store.list_jobs(vault_id, None).await.unwrap().len(),
+        jobs_before
+    );
+    assert_eq!(
+        std::fs::read(vault.root.join("log.md")).expect("log.md"),
+        log_before,
+        "no-op poll must not touch log.md"
+    );
+}
+
+/// T7a: a successful walk advances `last_poll_at` and keeps `last_error`
+/// clear.
+#[tokio::test]
+async fn sync_state_updated_after_walk() {
+    let (base, stub) = stub_webdav();
+    stub.insert("a.md", b"a", "\"1\"");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+    poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect("poll 1");
+    let s1 = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    assert!(s1.last_poll_at.is_some(), "last_poll_at set after success");
+    assert!(s1.last_error.is_none(), "clean poll has no last_error");
+
+    poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect("poll 2");
+    let s2 = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    assert!(
+        s2.last_poll_at.as_deref() > s1.last_poll_at.as_deref(),
+        "last_poll_at advanced: {:?} -> {:?}",
+        s1.last_poll_at,
+        s2.last_poll_at
+    );
+    assert!(s2.last_error.is_none());
+}
+
+/// T7b: a failed walk records a sanitized `last_error` (NEVER the stub
+/// password), applies ZERO removals (Pitfall 3), leaves state and log.md
+/// untouched, and the next tick recovers cleanly.
+#[tokio::test]
+async fn poll_failure_records_last_error() {
+    let (base, stub) = stub_webdav();
+    stub.insert("note.md", b"hello", "\"n1\"");
+    let (_tmp, vault_id, store, vault, src) =
+        setup_watch_with(&base, None, Some("user"), Some("s3cr3t-stub-pw")).await;
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("clean poll"),
+        1
+    );
+    let rows_before = store
+        .list_watch_rows(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .len();
+    let log_before = std::fs::read(vault.root.join("log.md")).expect("log.md");
+
+    stub.fail_next_propfind();
+    poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect_err("forced PROPFIND failure must surface as Err");
+
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    let err = sync.last_error.expect("last_error recorded");
+    assert!(
+        !err.contains("s3cr3t-stub-pw"),
+        "credential leaked into last_error: {err}"
+    );
+    // Pitfall 3: a failed walk must prune NOTHING and log NOTHING.
+    assert_eq!(
+        store
+            .list_watch_rows(vault_id, &src.source_id)
+            .await
+            .unwrap()
+            .len(),
+        rows_before,
+        "zero state rows deleted on a failed walk"
+    );
+    assert_eq!(
+        std::fs::read(vault.root.join("log.md")).expect("log.md"),
+        log_before,
+        "failed walk writes no log lines"
+    );
+
+    // Next tick recovers: clean walk clears last_error.
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("recovery poll"),
+        0
+    );
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    assert!(
+        sync.last_error.is_none(),
+        "last_error cleared after recovery"
     );
 }
