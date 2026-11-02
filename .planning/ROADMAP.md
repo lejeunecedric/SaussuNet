@@ -69,7 +69,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Watcher state (etags, pageTokens, last-check) persists in SQLite: restarting the server resumes watching with no full re-scan
   3. Re-polling a folder of unchanged files enqueues nothing (sha256-gated enqueue)
 **Plans**:
-  - [ ] 04-01: `[[watch]]` config surface — parse/resolve/validation + SecretString secrecy (tdd, wave 1) → SRCC-01, T12/T13
+  - [x] 04-01: `[[watch]]` config surface — parse/resolve/validation + SecretString secrecy (tdd, wave 1) → SRCC-01, T12/T13
   - [ ] 04-02: migration 0009 `watch_state` + narrower sync_state writers (execute, wave 1) → SRCC-02, T16
   - [ ] 04-03: pure watch logic — multistatus parser + diff classifier (tdd, wave 2) → SRCC-01/02, T14
   - [ ] 04-04: walking skeleton — DavClient + poll_once + `ingest_raw` + stub server (execute, wave 3) → SRCC-01/02, T1/T11a/T15
@@ -111,6 +111,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 1. Workspace Foundations + Vault Writer | 4/4 | Complete    | 2026-10-25 |
 | 2. LLM Provider + Durable Job Queue | 5/5 | Complete   | 2026-10-26 |
 | 3. Extraction Pipeline | 8/8 | Complete   | 2026-10-30 |
-| 4. Continuous Source Watching | 0/? | Not started | - |
+| 4. Continuous Source Watching | 1/7 | In Progress|  |
 | 5. Health Lint + Review & Monitoring UI | 0/? | Not started | - |
 | 6. Exposure + Deployment | 0/? | Not started | - |
