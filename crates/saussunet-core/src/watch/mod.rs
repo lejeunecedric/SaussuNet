@@ -4,5 +4,6 @@
 //! sync-report bodies, `diff` classifies walk-vs-state deltas. 04-04 adds
 //! `pub mod dav;` (HTTP client) and `poll_once` wiring here.
 
+pub mod dav;
 pub mod diff;
 pub mod multistatus;
