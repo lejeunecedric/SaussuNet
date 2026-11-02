@@ -205,9 +205,15 @@ async fn poll_inner(
                         // D-11 hygiene: the error surface is pre-sanitized;
                         // strip newlines from the server-influenced path too.
                         let msg = sanitize_line(&e.to_string());
-                        tracing::debug!("watch: {verb} {} failed: {msg}", sanitize_line(&entry.path));
+                        tracing::debug!(
+                            "watch: {verb} {} failed: {msg}",
+                            sanitize_line(&entry.path)
+                        );
                         if file_err.is_none() {
-                            file_err = Some(format!("{verb} {} failed: {msg}", sanitize_line(&entry.path)));
+                            file_err = Some(format!(
+                                "{verb} {} failed: {msg}",
+                                sanitize_line(&entry.path)
+                            ));
                         }
                     }
                 }
@@ -427,9 +433,15 @@ async fn apply_sync_report(ctx: &DeltaCtx<'_>, report: &dav::SyncReport) -> Resu
                     Ok(false) => {}
                     Err(e) => {
                         let msg = sanitize_line(&e.to_string());
-                        tracing::debug!("watch sync: {verb} {} failed: {msg}", sanitize_line(&entry.path));
+                        tracing::debug!(
+                            "watch sync: {verb} {} failed: {msg}",
+                            sanitize_line(&entry.path)
+                        );
                         if file_err.is_none() {
-                            file_err = Some(format!("sync {verb} {} failed: {msg}", sanitize_line(&entry.path)));
+                            file_err = Some(format!(
+                                "sync {verb} {} failed: {msg}",
+                                sanitize_line(&entry.path)
+                            ));
                         }
                     }
                 }

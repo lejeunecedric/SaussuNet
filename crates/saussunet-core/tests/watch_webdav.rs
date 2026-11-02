@@ -225,7 +225,12 @@ fn handle_conn(
             }
         }
         "GET" => {
-            if fail_gets.lock().unwrap().iter().any(|p| p == path.trim_start_matches('/')) {
+            if fail_gets
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == path.trim_start_matches('/'))
+            {
                 // H1: persistent per-file GET failure (the wedging case).
                 (500, vec![], b"boom".to_vec())
             } else {
@@ -1546,7 +1551,10 @@ async fn failing_file_does_not_wedge_the_walk() {
     let log = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
     assert!(log.contains("added: a.md"), "prior delta logged: {log}");
     assert!(log.contains("added: c.md"), "later delta logged: {log}");
-    assert!(!log.contains("added: b.md"), "failed file not logged: {log}");
+    assert!(
+        !log.contains("added: b.md"),
+        "failed file not logged: {log}"
+    );
 
     // The failure is recorded (sanitized) for the operator.
     let sync = store
@@ -1555,7 +1563,10 @@ async fn failing_file_does_not_wedge_the_walk() {
         .unwrap()
         .expect("sync row");
     let err = sync.last_error.expect("last_error recorded");
-    assert!(err.contains("b.md"), "last_error names the failing file: {err}");
+    assert!(
+        err.contains("b.md"),
+        "last_error names the failing file: {err}"
+    );
 
     // Next poll: b.md still fails, but a.md/c.md are NOT re-enqueued —
     // their state rows were written, so only b.md replays.
@@ -1596,7 +1607,10 @@ async fn sync_failing_file_flushes_log_and_holds_token() {
     let jobs = store.list_jobs(vault_id, Some("pending")).await.unwrap();
     assert_eq!(jobs.len(), 1, "a.md enqueued despite b.md failing");
     let log = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
-    assert!(log.contains("added: a.md"), "successful delta logged: {log}");
+    assert!(
+        log.contains("added: a.md"),
+        "successful delta logged: {log}"
+    );
 
     let sync = store
         .get_sync_state(vault_id, &src.source_id)
@@ -1649,7 +1663,9 @@ async fn dotfile_md_is_skipped_not_fatal() {
     );
     let log2 = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
     assert_eq!(
-        log2.lines().filter(|l| l.contains("empty file stem")).count(),
+        log2.lines()
+            .filter(|l| l.contains("empty file stem"))
+            .count(),
         1,
         "skip note logged exactly once: {log2}"
     );
@@ -1726,13 +1742,7 @@ async fn url_for_rejects_dot_segments() {
     let (base, stub) = stub_webdav();
     let src = watch_for(&base, None, None);
     let client = DavClient::new(&src).expect("client builds");
-    for rel in [
-        "../etc/passwd",
-        "..",
-        "a/../../b.md",
-        "./x.md",
-        "a/./b.md",
-    ] {
+    for rel in ["../etc/passwd", "..", "a/../../b.md", "./x.md", "a/./b.md"] {
         let err = client
             .get_bytes(rel, 1024)
             .await
