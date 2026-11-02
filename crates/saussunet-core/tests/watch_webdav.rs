@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use saussunet_core::config::{FileConfig, ResolvedWatch};
@@ -27,15 +27,49 @@ struct StubFile {
 /// One recorded request: (method, decoded path, Depth header, body).
 pub type ReqLog = Vec<(String, String, Option<String>, String)>;
 
+/// Per-item status in a scripted sync reply (RFC 6578: 200 = added/changed,
+/// 404 = removed).
+#[derive(Clone, Copy, Debug)]
+pub enum ItemStatus {
+    Ok,
+    Removed,
+}
+
+/// One scripted sync-collection 207 body: items + trailing sync-token.
+#[derive(Clone, Debug)]
+pub struct SyncReply {
+    pub items: Vec<(String, ItemStatus)>,
+    pub token: String,
+}
+
+/// 04-07 sync stub modes (plan 04-07 Context).
+#[derive(Clone, Debug)]
+pub enum SyncMode {
+    /// Default: every POST answers 400 (server has no sync-collection).
+    Unsupported,
+    /// Answer POSTs with scripted 207 replies in order (last reply repeats).
+    Enabled { script: Vec<SyncReply> },
+}
+
+/// Shared sync state for the stub's POST handler.
+#[derive(Clone)]
+struct StubSync {
+    mode: Arc<Mutex<SyncMode>>,
+    /// When set, a POST whose body contains this string answers 400
+    /// (stale-token simulation, Pitfall 5).
+    reject_token: Arc<Mutex<Option<String>>>,
+    /// Counts POSTs so scripted replies advance one per request.
+    posts: Arc<AtomicUsize>,
+}
+
 /// Handle into the running stub. Tree keys are DECODED vault-relative paths;
 /// directory keys end with '/'.
 #[derive(Clone)]
 pub struct StubHandle {
     tree: Arc<Mutex<HashMap<String, StubFile>>>,
     log: Arc<Mutex<ReqLog>>,
-    /// 04-07 knob (unused in 04-04): flip to make POST answer 207 instead of
-    /// the D-05 fallback 400.
-    sync_mode: Arc<AtomicBool>,
+    /// 04-07 knob: sync-collection behavior of the POST handler.
+    sync: StubSync,
     /// 04-05 knob: when set, the NEXT PROPFIND answers 500 once (T7 walk
     /// failure), then the flag clears itself.
     fail_propfind: Arc<AtomicBool>,
@@ -63,9 +97,14 @@ impl StubHandle {
     pub fn requests(&self) -> ReqLog {
         self.log.lock().unwrap().clone()
     }
-    #[allow(dead_code)]
-    pub fn set_sync_mode(&self, on: bool) {
-        self.sync_mode.store(on, Ordering::SeqCst);
+    /// 04-07: script the sync-collection (POST) behavior.
+    pub fn set_sync_mode(&self, mode: SyncMode) {
+        *self.sync.mode.lock().unwrap() = mode;
+    }
+    /// 04-07: POSTs whose body contains `token` answer 400 (stale-token
+    /// simulation — Pitfall 5 guard).
+    pub fn set_sync_reject_token(&self, token: &str) {
+        *self.sync.reject_token.lock().unwrap() = Some(token.to_string());
     }
     /// Make the next PROPFIND fail with 500 (one-shot).
     pub fn fail_next_propfind(&self) {
@@ -79,12 +118,16 @@ pub fn stub_webdav() -> (String, StubHandle) {
     let addr = listener.local_addr().expect("stub addr");
     let tree: Arc<Mutex<HashMap<String, StubFile>>> = Arc::new(Mutex::new(HashMap::new()));
     let log: Arc<Mutex<ReqLog>> = Arc::new(Mutex::new(Vec::new()));
-    let sync_mode = Arc::new(AtomicBool::new(false));
+    let sync = StubSync {
+        mode: Arc::new(Mutex::new(SyncMode::Unsupported)),
+        reject_token: Arc::new(Mutex::new(None)),
+        posts: Arc::new(AtomicUsize::new(0)),
+    };
     let fail_propfind = Arc::new(AtomicBool::new(false));
     let (tree_t, log_t, sync_t, fail_t) = (
         Arc::clone(&tree),
         Arc::clone(&log),
-        Arc::clone(&sync_mode),
+        sync.clone(),
         Arc::clone(&fail_propfind),
     );
     std::thread::spawn(move || loop {
@@ -93,10 +136,10 @@ pub fn stub_webdav() -> (String, StubHandle) {
         };
         let tree = Arc::clone(&tree_t);
         let log = Arc::clone(&log_t);
-        let sync_mode = Arc::clone(&sync_t);
+        let sync = sync_t.clone();
         let fail_propfind = Arc::clone(&fail_t);
         std::thread::spawn(move || {
-            let _ = handle_conn(&mut stream, &tree, &log, &sync_mode, &fail_propfind);
+            let _ = handle_conn(&mut stream, &tree, &log, &sync, &fail_propfind);
         });
     });
     (
@@ -104,7 +147,7 @@ pub fn stub_webdav() -> (String, StubHandle) {
         StubHandle {
             tree,
             log,
-            sync_mode,
+            sync,
             fail_propfind,
         },
     )
@@ -114,7 +157,7 @@ fn handle_conn(
     stream: &mut std::net::TcpStream,
     tree: &Mutex<HashMap<String, StubFile>>,
     log: &Mutex<ReqLog>,
-    sync_mode: &AtomicBool,
+    sync: &StubSync,
     fail_propfind: &AtomicBool,
 ) -> std::io::Result<()> {
     // Read headers until \r\n\rn, then exactly Content-Length bytes.
@@ -171,16 +214,24 @@ fn handle_conn(
         }
         "GET" => get_response(tree, &path),
         "POST" => {
-            // D-05 fallback path: sync unsupported by default (04-07 flips
-            // sync_mode to serve canned 207 sync-reports).
-            if sync_mode.load(Ordering::SeqCst) {
-                (
-                    207,
-                    vec!["Content-Type: application/xml".to_string()],
-                    b"<d:multistatus xmlns:d=\"DAV:\"></d:multistatus>".to_vec(),
-                )
-            } else {
-                (400, vec![], b"Not Implemented".to_vec())
+            // RFC 6578 sync-collection (POST-as-REPORT). Bodies already
+            // land in the request log — tests assert on recorded bodies.
+            let idx = sync.posts.fetch_add(1, Ordering::SeqCst);
+            let mode = sync.mode.lock().unwrap().clone();
+            let reject = sync.reject_token.lock().unwrap().clone();
+            let body_str = String::from_utf8_lossy(&body).to_string();
+            match &mode {
+                SyncMode::Unsupported => (400, vec![], b"Not Implemented".to_vec()),
+                _ if reject.as_deref().is_some_and(|r| body_str.contains(r)) => {
+                    (400, vec![], b"stale sync-token".to_vec())
+                }
+                SyncMode::Enabled { script } => {
+                    let reply = script
+                        .get(idx)
+                        .or_else(|| script.last())
+                        .expect("sync script non-empty");
+                    sync_report_response(tree, &raw_path, reply)
+                }
             }
         }
         _ => (405, vec![], b"Method Not Allowed".to_vec()),
@@ -304,6 +355,56 @@ fn get_response(
         ),
         _ => (404, vec![], b"Not Found".to_vec()),
     }
+}
+
+/// Build a scripted sync-report 207 body (SYNC207 fixture shape from
+/// watch/multistatus.rs tests): per-item `<d:status>` 200/404 plus a
+/// trailing `<d:sync-token>`. 200-items take etag/size from the tree when
+/// present (so the poller's GET of a changed file succeeds).
+fn sync_report_response(
+    tree: &Mutex<HashMap<String, StubFile>>,
+    raw_path: &str,
+    reply: &SyncReply,
+) -> (u16, Vec<String>, Vec<u8>) {
+    let self_href = if raw_path.is_empty() { "/" } else { raw_path };
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<d:multistatus xmlns:d=\"DAV:\">\n",
+    );
+    for (path, status) in &reply.items {
+        let href = format!(
+            "{}/{}",
+            self_href.trim_end_matches('/'),
+            path.split('/')
+                .map(encode_segment)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        match status {
+            ItemStatus::Ok => {
+                let (etag, len) = tree
+                    .lock()
+                    .unwrap()
+                    .get(path.as_str())
+                    .map(|f| (f.etag.clone(), f.bytes.len()))
+                    .unwrap_or_else(|| ("\"sync\"".to_string(), 0usize));
+                xml.push_str(&format!(
+                    "  <d:response><d:href>{href}</d:href><d:propstat><d:prop><d:getetag>{etag}</d:getetag><d:getcontentlength>{len}</d:getcontentlength></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:status>HTTP/1.1 200 OK</d:status></d:response>\n"
+                ));
+            }
+            ItemStatus::Removed => {
+                xml.push_str(&format!(
+                    "  <d:response><d:href>{href}</d:href><d:propstat><d:prop/><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat><d:status>HTTP/1.1 404 Not Found</d:status></d:response>\n"
+                ));
+            }
+        }
+    }
+    xml.push_str(&format!("<d:sync-token>{}</d:sync-token>", reply.token));
+    xml.push_str("</d:multistatus>");
+    (
+        207,
+        vec!["Content-Type: application/xml".to_string()],
+        xml.into_bytes(),
+    )
 }
 
 /// Percent-encode one path segment: keep `[A-Za-z0-9._~-]`, encode per byte.
@@ -1185,5 +1286,214 @@ async fn restart_resumes_without_rescan() {
     assert_eq!(
         store.list_jobs(1, None).await.unwrap().len(),
         jobs_before + 1
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 04-07 — opportunistic RFC 6578 sync-collection (T8a/T8b + Pitfall 5)
+// ---------------------------------------------------------------------------
+
+/// T8a: first poll POSTs sync-collection with an EMPTY token, the returned
+/// `<d:sync-token>` persists in sync_state.token, the second poll's report
+/// body carries that token, and a 404-status item yields the removal log +
+/// state prune + token advance. No PROPFIND is ever sent.
+#[tokio::test]
+async fn sync_token_persisted_and_reused() {
+    let (base, stub) = stub_webdav();
+    stub.insert("note.md", b"hello", "\"n1\"");
+    stub.set_sync_mode(SyncMode::Enabled {
+        script: vec![
+            SyncReply {
+                items: vec![("note.md".to_string(), ItemStatus::Ok)],
+                token: "http://stub/sync/1".to_string(),
+            },
+            SyncReply {
+                items: vec![("gone.md".to_string(), ItemStatus::Removed)],
+                token: "http://stub/sync/2".to_string(),
+            },
+        ],
+    });
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+
+    // Poll 1: initial sync (empty token) → note.md enqueued, token persisted.
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("sync poll 1"),
+        1
+    );
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    assert_eq!(sync.token.as_deref(), Some("http://stub/sync/1"));
+    assert!(!sync.sync_unsupported, "sync-capable server must not latch");
+    assert_eq!(store.list_jobs(vault_id, None).await.unwrap().len(), 1);
+
+    // Poll 2: carries token 1; 404-item → removal log + prune + advance.
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("sync poll 2"),
+        0
+    );
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    assert_eq!(sync.token.as_deref(), Some("http://stub/sync/2"));
+
+    let log = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
+    assert!(log.contains("removed: gone.md"), "404-item logged: {log}");
+    assert!(log.contains("added: note.md"), "200-item logged: {log}");
+    let rows = store
+        .list_watch_rows(vault_id, &src.source_id)
+        .await
+        .unwrap();
+    assert!(!rows.iter().any(|r| r.path == "gone.md"), "row pruned");
+    assert!(
+        rows.iter().any(|r| r.path == "note.md"),
+        "note.md row intact"
+    );
+
+    // Request-shape assertions (T8a): exactly two POSTs, zero PROPFINDs.
+    let reqs = stub.requests();
+    let posts: Vec<&(String, String, Option<String>, String)> =
+        reqs.iter().filter(|(m, ..)| m == "POST").collect();
+    assert_eq!(posts.len(), 2, "one sync report per poll: {reqs:?}");
+    assert!(
+        !reqs.iter().any(|(m, ..)| m == "PROPFIND"),
+        "sync-capable poll must not walk: {reqs:?}"
+    );
+    for (_, _, depth, _) in &posts {
+        assert_eq!(depth.as_deref(), Some("0"), "POST-as-REPORT is Depth: 0");
+    }
+    assert!(
+        posts[0].3.contains("<d:sync-token></d:sync-token>"),
+        "initial sync carries an empty token: {}",
+        posts[0].3
+    );
+    assert!(
+        posts[0].3.contains("<d:sync-level>infinity</d:sync-level>"),
+        "sync-level infinity at the root (one token per source): {}",
+        posts[0].3
+    );
+    assert!(
+        posts[1].3.contains("http://stub/sync/1"),
+        "second report carries the persisted token: {}",
+        posts[1].3
+    );
+}
+
+/// T8b: a server that 400s the report latches sync_unsupported after ONE
+/// POST ever; every subsequent poll is PROPFIND-only and ingestion keeps
+/// working through the walk.
+#[tokio::test]
+async fn sync_unsupported_falls_back_forever() {
+    let (base, stub) = stub_webdav(); // default: SyncMode::Unsupported
+    stub.insert("note.md", b"hello", "\"n1\"");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+
+    // Poll 1: POST 400 → latch → walk applies the delta in the SAME poll.
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("fallback poll 1"),
+        1,
+        "walk ingestion must still work on the latching poll"
+    );
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    assert!(sync.sync_unsupported, "D-05 latch set after 400");
+
+    // Poll 2: zero further POSTs ever — PROPFIND-only from here on.
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("fallback poll 2"),
+        0
+    );
+    let posts = stub.requests().iter().filter(|(m, ..)| m == "POST").count();
+    assert_eq!(posts, 1, "exactly one POST ever");
+
+    // Ingestion via the walk still works after the latch.
+    stub.insert("later.md", b"later", "\"l1\"");
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("fallback poll 3"),
+        1
+    );
+    assert_eq!(
+        stub.requests().iter().filter(|(m, ..)| m == "POST").count(),
+        1,
+        "still exactly one POST ever"
+    );
+}
+
+/// Pitfall 5: a 400 on a STORED token triggers exactly one empty-token
+/// retry (full re-sync) — never a latch, never fatal. The sha256 gate
+/// absorbs the re-sync without a re-ingest storm.
+#[tokio::test]
+async fn stale_token_resyncs_not_latches() {
+    let (base, stub) = stub_webdav();
+    stub.insert("note.md", b"hello", "\"n1\"");
+    stub.set_sync_mode(SyncMode::Enabled {
+        script: vec![SyncReply {
+            items: vec![("note.md".to_string(), ItemStatus::Ok)],
+            token: "http://stub/sync/1".to_string(),
+        }],
+    });
+    stub.set_sync_reject_token("stale-token");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+    // Seed an expired token the stub will reject.
+    store
+        .set_sync_token(vault_id, &src.source_id, Some("stale-token"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("stale-token poll must resync, not fail"),
+        1
+    );
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    assert!(
+        !sync.sync_unsupported,
+        "stale token must NEVER latch sync_unsupported (Pitfall 5)"
+    );
+    assert_eq!(sync.token.as_deref(), Some("http://stub/sync/1"));
+    assert_eq!(sync.last_error, None, "resync is not an error");
+
+    let reqs = stub.requests();
+    let posts: Vec<&(String, String, Option<String>, String)> =
+        reqs.iter().filter(|(m, ..)| m == "POST").collect();
+    assert_eq!(
+        posts.len(),
+        2,
+        "one failed report + exactly one retry: {reqs:?}"
+    );
+    assert!(
+        posts[0].3.contains("stale-token"),
+        "first attempt used stored token"
+    );
+    assert!(
+        posts[1].3.contains("<d:sync-token></d:sync-token>"),
+        "retry carries the empty token: {}",
+        posts[1].3
+    );
+    assert!(
+        !reqs.iter().any(|(m, ..)| m == "PROPFIND"),
+        "resync stays on the sync path: {reqs:?}"
     );
 }
