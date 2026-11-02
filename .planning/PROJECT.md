@@ -19,12 +19,13 @@ Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-d
 - [x] Rust workspace: `saussunet-core` (lib) + standalone web binary; MoriNet can depend on the lib later — Validated in Phase 1 (zero-axum core enforced by CI guard, sqlx 0.8 pinned for MoriNet interop)
 - [x] Abstract LLM provider: local (Strix Halo / ROCm) or cloud API, interchangeable — Validated in Phase 2 (`LlmProvider` trait + `MockProvider` + `OpenAiCompat`, live-proven against a real OpenAI-compatible endpoint; durable SQLite job queue with atomic claim/retry/reap)
 - [x] Ingestion pipeline: sources → extraction/linking → llm-wiki notes (SCHEMA, index, log, wikilinks, frontmatter) — Validated in Phase 3 (URL + PDF ingestion, sha256 no-op/drift, threshold gate, entity-registry dedup, provenance + contested flags, deterministic write-path validator; 214 tests green, phase acceptance sc1–sc5)
+- [x] Continuous source watching: WebDAV watched sources polled on an interval, vault updates itself — Validated in Phase 4 (hand-rolled PROPFIND Depth:1 BFS with depth cap, opportunistic RFC 6578 sync-token with fallback latch, watch_state persistence + restart-resume no re-scan, sha256-gated no-op polls, ingest_raw job kind; 266 core tests green; manual UAT against a real LAN WebDAV server pending)
 
 ### Active
 
 <!-- Starting hypotheses, validated by shipping. -->
 
-- [ ] File sources: Google Drive, WebDAV, documents (PDF/web) — poll/continuous watch
+- [ ] File sources: Google Drive (v2) — WebDAV watching shipped in Phase 4
 - [ ] Inbound MCP sources: the vault stores only **pointer notes** (access-point address), content read live via stream on demand
 - [ ] Outbound MCP exposure: the vault served over MCP for external agent reading
 - [ ] Optional ontology (YAML, OWL, RDF, schema): object classes, their display, and relations — otherwise default llm-wiki ontology
@@ -92,4 +93,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-30 — Phase 3 (Extraction Pipeline) complete: 214 tests green, URL+PDF end-to-end ingestion with validator-gated writes*
+*Last updated: 2026-11-02 — Phase 4 (Continuous Source Watching) complete: 266 core tests green, WebDAV polling with depth-capped PROPFIND walk + RFC 6578 sync-token + restart-resume; manual LAN-server UAT pending*

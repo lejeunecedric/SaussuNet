@@ -30,8 +30,8 @@ Requirements for initial release (lean v1). Each maps to roadmap phases.
 
 ### Source Watching
 
-- [ ] **SRCC-01**: User can configure a WebDAV folder as a watched source; the system polls it on an interval, detects new/changed/removed files (etag/size), and enqueues ingestion jobs (Depth:1 walk with depth cap, never Depth: infinity)
-- [ ] **SRCC-02**: Watcher state (etags, pageTokens, last-check) persists in SQLite and survives restarts; enqueue is sha256-gated so re-polls of unchanged files are no-ops
+- [x] **SRCC-01**: User can configure a WebDAV folder as a watched source; the system polls it on an interval, detects new/changed/removed files (etag/size), and enqueues ingestion jobs (Depth:1 walk with depth cap, never Depth: infinity)
+- [x] **SRCC-02**: Watcher state (etags, pageTokens, last-check) persists in SQLite and survives restarts; enqueue is sha256-gated so re-polls of unchanged files are no-ops
 - [x] **SRCC-03**: Ingestion jobs are durable (SQLite queue with atomic claim, retry states, claimed-at expiry) — a crash mid-batch resumes without loss or duplication
 
 ### Health Lint
@@ -118,8 +118,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PIPE-04 | Phase 3 | Complete |
 | PIPE-05 | Phase 3 | Complete |
 | PIPE-06 | Phase 3 | Complete |
-| SRCC-01 | Phase 4 | Pending |
-| SRCC-02 | Phase 4 | Pending |
+| SRCC-01 | Phase 4 | Complete |
+| SRCC-02 | Phase 4 | Complete |
 | LINT-01 | Phase 5 | Pending |
 | LINT-02 | Phase 5 | Pending |
 | REVI-01 | Phase 5 | Pending |

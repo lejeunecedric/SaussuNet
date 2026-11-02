@@ -3,13 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: ready_to_plan
-last_updated: "2026-11-02T00:05:05.659Z"
+last_updated: 2026-11-02T01:34:03.451Z
 progress:
   total_phases: 6
   completed_phases: 3
   total_plans: 24
-  completed_plans: 17
+  completed_plans: 24
   percent: 50
+stopped_at: Phase 4 complete (7/7) — ready to discuss Phase 5
 ---
 
 # State: SaussuNet
@@ -45,7 +46,7 @@ Single-writer vault layer, atomic writes, `gen_hash` edit protection, and the mu
 | 1. Workspace Foundations + Vault Writer | Complete | — |
 | 2. LLM Provider + Durable Job Queue | Complete | — |
 | 3. Extraction Pipeline | Complete | 8 plans; 214+ tests; UAT 8/9 pass live; 3 live-UAT fixes (thinking-off, raw/ marker, wikilink floor) |
-| 4. Continuous Source Watching | Planned | 7 plans (waves 1–6), checker passed, validation signed off 2026-11-01 |
+| 4. Continuous Source Watching | Complete | 7 plans; 266 core tests; review H1/M1/M2 fixed TDD; verifier 5/5 (human UAT on real LAN WebDAV pending) |
 | 5. Health Lint + Review & Monitoring UI | Not started | — |
 | 6. Exposure + Deployment | Not started | — |
 
