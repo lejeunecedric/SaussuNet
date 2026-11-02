@@ -20,6 +20,10 @@ pub struct FileConfig {
     pub llm: LlmSection,
     #[serde(default)]
     pub pipeline: PipelineSection,
+    /// D-01: zero or more `[[watch]]` entries — WebDAV folders polled
+    /// continuously (SRCC-01). Empty vec means the daemon spawns no watchers.
+    #[serde(default)]
+    pub watch: Vec<WatchSection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,6 +115,27 @@ pub struct PipelineSection {
     pub max_fetch_bytes: u64,
 }
 
+/// D-01: one watched WebDAV folder (SRCC-01). `url` is operator-trusted
+/// (D-03: private/LAN IPs allowed — no SSRF guard here). `password` is a
+/// `SecretString` so no `{:?}` rendering ever leaks it (D-02).
+#[derive(Debug, Clone, Deserialize)]
+pub struct WatchSection {
+    pub url: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<SecretString>,
+    /// D-10: poll interval, default 300 s.
+    #[serde(default = "default_watch_interval_secs")]
+    pub interval_secs: u64,
+    /// D-04: PROPFIND walk depth cap.
+    #[serde(default = "default_watch_depth_cap")]
+    pub depth_cap: u32,
+    /// D-08: ingest extension allowlist (include-globs deferred).
+    #[serde(default = "default_watch_extensions")]
+    pub extensions: Vec<String>,
+}
+
 impl Default for ServerSection {
     fn default() -> Self {
         Self {
@@ -156,6 +181,19 @@ impl Default for PipelineSection {
             min_sources: default_min_sources(),
             max_upload_bytes: default_max_upload_bytes(),
             max_fetch_bytes: default_max_fetch_bytes(),
+        }
+    }
+}
+
+impl Default for WatchSection {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            username: None,
+            password: None,
+            interval_secs: default_watch_interval_secs(),
+            depth_cap: default_watch_depth_cap(),
+            extensions: default_watch_extensions(),
         }
     }
 }
@@ -210,6 +248,18 @@ fn default_max_upload_bytes() -> u64 {
 
 fn default_max_fetch_bytes() -> u64 {
     5_242_880
+}
+
+fn default_watch_interval_secs() -> u64 {
+    300
+}
+
+fn default_watch_depth_cap() -> u32 {
+    4
+}
+
+fn default_watch_extensions() -> Vec<String> {
+    ["md", "txt", "pdf"].iter().map(|s| s.to_string()).collect()
 }
 
 /// D-13: normalize a configured base path to `/<segments>` — leading slash,
@@ -540,5 +590,51 @@ mod tests {
             let rt = cfg.resolve().expect("resolve");
             assert_eq!(rt.base_path, expected, "base_path {input:?} must normalize");
         }
+    }
+
+    // ---- Phase 4: [[watch]] sources (SRCC-01, D-01/D-02/D-04/D-08/D-10) ----
+
+    #[test]
+    fn bare_watch_section_defaults() {
+        // T13: a bare [[watch]] with only `url` parses with the D-10/D-04/D-08 defaults.
+        let cfg: FileConfig = toml::from_str("[[watch]]\nurl = \"https://nas.lan/dav/\"\n")
+            .expect("bare [[watch]] must parse");
+        assert_eq!(cfg.watch.len(), 1);
+        assert_eq!(cfg.watch[0].url, "https://nas.lan/dav/");
+        assert_eq!(cfg.watch[0].interval_secs, 300);
+        assert_eq!(cfg.watch[0].depth_cap, 4);
+        assert_eq!(cfg.watch[0].extensions, ["md", "txt", "pdf"]);
+        assert!(cfg.watch[0].username.is_none());
+        assert!(cfg.watch[0].password.is_none());
+    }
+
+    #[test]
+    fn absent_watch_section_is_empty_vec() {
+        // Zero [[watch]] entries → zero watchers (daemon behavior unchanged).
+        let cfg: FileConfig = toml::from_str("").expect("empty TOML must parse");
+        assert!(cfg.watch.is_empty());
+    }
+
+    #[test]
+    fn full_watch_section_parses() {
+        let cfg: FileConfig = toml::from_str(
+            "[[watch]]\n\
+             url = \"https://nas.lan/dav/vault-inbox/\"\n\
+             username = \"saussu\"\n\
+             password = \"test-pass-9f3a\"\n\
+             interval_secs = 60\n\
+             depth_cap = 2\n\
+             extensions = [\"md\", \"epub\"]\n",
+        )
+        .expect("full [[watch]] must parse");
+        assert_eq!(cfg.watch.len(), 1);
+        assert_eq!(cfg.watch[0].username.as_deref(), Some("saussu"));
+        assert_eq!(
+            cfg.watch[0].password.as_ref().map(SecretString::reveal),
+            Some("test-pass-9f3a")
+        );
+        assert_eq!(cfg.watch[0].interval_secs, 60);
+        assert_eq!(cfg.watch[0].depth_cap, 2);
+        assert_eq!(cfg.watch[0].extensions, ["md", "epub"]);
     }
 }
