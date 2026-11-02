@@ -29,6 +29,16 @@ pub const MAX_SYNC_TOKEN_CHARS: usize = 4096;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 5;
 
+/// M2 (04 review): classify a `sync_collection` error for the latch
+/// decision. True ONLY for HTTP-level "not supported" signals — the server
+/// answered, but not with 207 (400/405/501, or a 200-instead-of-207 style
+/// response per the plan's non-207 rule). Transport failures (connection
+/// refused, timeout) and post-207 body faults are NOT unsupported signals:
+/// a briefly-down sync-capable server must not be demoted to walk-forever.
+pub fn is_sync_unsupported_signal(err: &CoreError) -> bool {
+    matches!(err, CoreError::Dav(m) if m.contains("expected 207 Multi-Status"))
+}
+
 /// PROPFIND body verbatim from RESEARCH §protocol_notes.
 const PROPFIND_BODY: &str = r#"<?xml version="1.0"?>
 <d:propfind xmlns:d="DAV:">

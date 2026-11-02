@@ -305,18 +305,24 @@ async fn try_sync_poll(ctx: &DeltaCtx<'_>, stored_token: Option<&str>) -> Result
             );
             match client.sync_collection("", None).await {
                 Ok(r) => r,
-                Err(second) => {
+                Err(second) if dav::is_sync_unsupported_signal(&second) => {
                     tracing::debug!(
-                        "watch sync: empty-token resync also failed ({second}); latching sync_unsupported"
+                        "watch sync: empty-token resync also rejected ({second}); latching sync_unsupported"
                     );
                     store
                         .set_sync_unsupported(vault.id, &src.source_id, true)
                         .await?;
                     return Ok(None);
                 }
+                Err(second) => {
+                    // M2: transport-level failure on the retry — do NOT
+                    // latch; fail the poll so last_error records it and the
+                    // next tick retries sync.
+                    return Err(second);
+                }
             }
         }
-        Err(e) => {
+        Err(e) if dav::is_sync_unsupported_signal(&e) => {
             tracing::debug!(
                 "watch sync: sync-collection unsupported ({e}); latching sync_unsupported"
             );
@@ -324,6 +330,13 @@ async fn try_sync_poll(ctx: &DeltaCtx<'_>, stored_token: Option<&str>) -> Result
                 .set_sync_unsupported(vault.id, &src.source_id, true)
                 .await?;
             return Ok(None);
+        }
+        Err(e) => {
+            // M2: transport error on the first attempt (connection refused,
+            // timeout, …) — the server may well support sync; record the
+            // failure via last_error (caller) WITHOUT latching forever.
+            tracing::debug!("watch sync: attempt failed on a transport error ({e}); not latching");
+            return Err(e);
         }
     };
     let enqueued = apply_sync_report(ctx, &report).await?;

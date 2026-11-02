@@ -1655,3 +1655,61 @@ async fn dotfile_md_is_skipped_not_fatal() {
     );
     assert_eq!(store.list_jobs(vault_id, None).await.unwrap().len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// 04 review fix M2 — sync_unsupported may only latch on HTTP-level
+// "not supported" signals, never on transport failures.
+// ---------------------------------------------------------------------------
+
+/// M2: a connection-refused first poll is a TRANSPORT failure — the poll
+/// fails and records last_error, but a briefly-down sync-capable server
+/// must NOT be demoted to walk-forever.
+#[tokio::test]
+async fn transport_error_first_poll_does_not_latch_sync_unsupported() {
+    // Bind then drop a listener: the port is provably closed.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let base = format!("http://127.0.0.1:{port}/");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+
+    poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect_err("closed port must fail the poll");
+
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    assert!(
+        !sync.sync_unsupported,
+        "transport error must NOT latch sync_unsupported (M2)"
+    );
+    assert!(
+        sync.last_error.is_some(),
+        "the failure must still be recorded"
+    );
+}
+
+/// M2 counterpart: an HTTP-level 400 answer to the first sync report IS an
+/// unsupported signal and must latch (D-05 try-and-fallback).
+#[tokio::test]
+async fn http_400_first_poll_latches_sync_unsupported() {
+    let (base, stub) = stub_webdav(); // default: SyncMode::Unsupported → 400
+    stub.insert("note.md", b"hello", "\"n1\"");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("fallback poll"),
+        1
+    );
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    assert!(sync.sync_unsupported, "HTTP-level 400 must latch (M2)");
+}
