@@ -438,3 +438,134 @@ async fn href_with_spaces_roundtrips() {
         .expect("get_bytes on 'a b.md'");
     assert_eq!(bytes, b"spaces work");
 }
+
+// ---------------------------------------------------------------------------
+// Task 2 — poll_once integration (T1, T11a): stub walk → diff → download →
+// raw/watch copy → durable job. Zero real LLM (jobs are only ENQUEUED here).
+// ---------------------------------------------------------------------------
+
+use saussunet_core::pipeline::JOB_KIND_INGEST_RAW;
+use saussunet_core::vault::Vault;
+use saussunet_core::watch::poll_once;
+use saussunet_core::{boot_open, Store};
+use tempfile::TempDir;
+
+/// Boot a real vault + store (04-01 config path end-to-end) pointed at the stub.
+async fn setup_watch(stub_base: &str) -> (TempDir, i64, Arc<Store>, Arc<Vault>, ResolvedWatch) {
+    let tmp = TempDir::new().expect("tempdir");
+    let toml = format!(
+        "[storage]\ndata_dir = \"{}\"\n\n[vault]\nid = 1\nname = \"main\"\n\n[[watch]]\nurl = \"{stub_base}\"\ninterval_secs = 300\n",
+        tmp.path().display()
+    );
+    let cfg: FileConfig = toml::from_str(&toml).expect("config parses");
+    let rt = cfg.resolve().expect("resolve");
+    let (store, vault) = boot_open(&rt).await.expect("boot");
+    let src = rt.watch.first().expect("one watch").clone();
+    (tmp, vault.id, Arc::new(store), Arc::new(vault), src)
+}
+
+/// T1: one poll over a stub tree leaves pending `ingest_raw` jobs whose
+/// payloads point at real `raw/watch/…` copies with provenance frontmatter,
+/// plus watch_state rows (files + the directory bookkeeping row).
+#[tokio::test]
+async fn new_file_enqueues_ingest_job() {
+    let (base, stub) = stub_webdav();
+    stub.insert("note.md", b"# Note\nhello", "\"n1\"");
+    stub.insert("papers/", b"", "");
+    stub.insert("a b.md", b"spaces", "\"s1\"");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+
+    let enqueued = poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect("poll_once");
+    assert_eq!(
+        enqueued, 2,
+        "note.md + 'a b.md' enqueue, papers/ never does"
+    );
+
+    let jobs = store.list_jobs(vault_id, Some("pending")).await.unwrap();
+    assert_eq!(jobs.len(), 2);
+    assert!(
+        jobs.iter().all(|j| j.kind == JOB_KIND_INGEST_RAW),
+        "md files route to ingest_raw: {:?}",
+        jobs.iter().map(|j| &j.kind).collect::<Vec<_>>()
+    );
+    let mut filenames = Vec::new();
+    for j in &jobs {
+        let payload: serde_json::Value = serde_json::from_str(&j.payload_json).unwrap();
+        let raw_path = payload["raw_path"].as_str().unwrap();
+        assert!(
+            raw_path.starts_with("raw/watch/"),
+            "raw copy under raw/watch/: {raw_path}"
+        );
+        filenames.push(payload["filename"].as_str().unwrap().to_string());
+        let on_disk = std::fs::read(vault.root.join(raw_path)).expect("raw copy on disk");
+        let text = String::from_utf8_lossy(&on_disk);
+        assert!(
+            text.contains("source_url:"),
+            "provenance frontmatter: {text}"
+        );
+        assert!(text.contains("sha256:"), "provenance frontmatter: {text}");
+    }
+    assert!(filenames.contains(&"note.md".to_string()));
+    assert!(filenames.contains(&"a b.md".to_string()));
+
+    // Second poll: identical etags → zero deltas → zero new jobs.
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("second poll"),
+        0
+    );
+    assert_eq!(store.list_jobs(vault_id, None).await.unwrap().len(), 2);
+
+    // watch_state: two file rows + the papers/ directory row (is_dir).
+    let rows = store
+        .list_watch_rows(vault_id, &src.source_id)
+        .await
+        .unwrap();
+    let find = |p: &str| rows.iter().find(|r| r.path == p);
+    assert!(find("note.md").is_some_and(|r| !r.is_dir && r.sha256.is_some()));
+    assert!(find("a b.md").is_some_and(|r| !r.is_dir));
+    assert!(find("papers").is_some_and(|r| r.is_dir));
+
+    // record_sync_poll ran on the successful poll.
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap();
+    assert!(sync.is_some_and(|s| s.last_poll_at.is_some()));
+}
+
+/// T11a: .md/.txt → ingest_raw, .pdf → ingest_pdf, .docx → no job.
+#[tokio::test]
+async fn extension_allowlist_routing() {
+    let (base, stub) = stub_webdav();
+    stub.insert("a.md", b"md bytes", "\"1\"");
+    stub.insert("b.txt", b"txt bytes", "\"2\"");
+    stub.insert("c.pdf", b"%PDF-1.4\n% stub\n", "\"3\"");
+    stub.insert("d.docx", b"docx bytes", "\"4\"");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+
+    let enqueued = poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect("poll_once");
+    assert_eq!(enqueued, 3, "docx gets no job");
+
+    let jobs = store.list_jobs(vault_id, Some("pending")).await.unwrap();
+    let raws = jobs
+        .iter()
+        .filter(|j| j.kind == JOB_KIND_INGEST_RAW)
+        .count();
+    let pdfs = jobs
+        .iter()
+        .filter(|j| j.kind == saussunet_core::pipeline::JOB_KIND_INGEST_PDF)
+        .count();
+    assert_eq!(raws, 2, "a.md + b.txt → ingest_raw");
+    assert_eq!(pdfs, 1, "c.pdf → ingest_pdf");
+    assert!(
+        !jobs.iter().any(|j| j.payload_json.contains("docx")),
+        "d.docx must produce no job: {:?}",
+        jobs.iter().map(|j| &j.payload_json).collect::<Vec<_>>()
+    );
+}
