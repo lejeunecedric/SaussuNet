@@ -299,6 +299,26 @@ pub struct RuntimeConfig {
     pub pipeline_min_sources: u32,
     pub pipeline_max_upload_bytes: u64,
     pub pipeline_max_fetch_bytes: u64,
+    /// Resolved `[[watch]]` sources (SRCC-01). `Debug` is safe: passwords
+    /// render as `SecretString("***")`. Empty vec → daemon spawns no watchers.
+    pub watch: Vec<ResolvedWatch>,
+}
+
+/// A fully-validated watch entry — the only shape the Phase 4 poller
+/// (plans 04-04/04-06) consumes.
+#[derive(Debug, Clone)]
+pub struct ResolvedWatch {
+    /// The config `url` string VERBATIM — the state key, stable across
+    /// restarts (Phase 3 URL-as-source_id convention).
+    pub source_id: String,
+    pub url: url::Url,
+    pub username: Option<String>,
+    /// Debug-safe (D-02): renders as `SecretString("***")`.
+    pub password: Option<SecretString>,
+    pub interval: std::time::Duration,
+    pub depth_cap: u32,
+    /// Normalized allowlist: lowercased, leading dots stripped.
+    pub extensions: Vec<String>,
 }
 
 impl FileConfig {
@@ -318,6 +338,7 @@ impl FileConfig {
                 "llm.timeout_secs must be > 0 (0 would fail every provider request)".to_string(),
             ));
         }
+        let watch = self.resolve_watch()?;
         let data_dir = PathBuf::from(&self.storage.data_dir);
         // D-03: env wins over the file value; an empty env var is ignored.
         let llm_api_key = std::env::var(ENV_LLM_API_KEY)
@@ -341,7 +362,79 @@ impl FileConfig {
             pipeline_min_sources: self.pipeline.min_sources,
             pipeline_max_upload_bytes: self.pipeline.max_upload_bytes,
             pipeline_max_fetch_bytes: self.pipeline.max_fetch_bytes,
+            watch,
         })
+    }
+
+    /// Validate every `[[watch]]` entry (SRCC-01, WR-02 parity: all rejections
+    /// happen here, never at first poll). Per-entry order: URL parse + scheme +
+    /// userinfo → credential wholeness → interval > 0 → depth cap > 0 →
+    /// duplicate url (source_id collision). D-03: watch URLs are
+    /// operator-trusted — no SSRF/private-IP guard; plain http resolves with a
+    /// WARN.
+    fn resolve_watch(&self) -> Result<Vec<ResolvedWatch>> {
+        let mut out = Vec::with_capacity(self.watch.len());
+        let mut seen: Vec<&str> = Vec::with_capacity(self.watch.len());
+        for w in &self.watch {
+            let parsed = url::Url::parse(&w.url).map_err(|e| {
+                CoreError::Config(format!("watch url {:?} is not a valid URL: {e}", w.url))
+            })?;
+            if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                return Err(CoreError::Config(format!(
+                    "watch url {:?} must use http or https (got {:?})",
+                    w.url,
+                    parsed.scheme()
+                )));
+            }
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                return Err(CoreError::Config(format!(
+                    "watch url {:?} must not embed credentials — use the username/password keys",
+                    w.url
+                )));
+            }
+            if w.username.is_some() != w.password.is_some() {
+                return Err(CoreError::Config(format!(
+                    "watch {:?}: username and password must be set together",
+                    w.url
+                )));
+            }
+            if w.interval_secs == 0 {
+                return Err(CoreError::Config(format!(
+                    "watch {:?}: interval_secs must be > 0 (0 would hot-loop the poller)",
+                    w.url
+                )));
+            }
+            if w.depth_cap == 0 {
+                return Err(CoreError::Config(format!(
+                    "watch {:?}: depth_cap must be > 0 (0 would walk nothing)",
+                    w.url
+                )));
+            }
+            if seen.contains(&w.url.as_str()) {
+                return Err(CoreError::Config(format!(
+                    "duplicate watch url {:?} (source_id collision)",
+                    w.url
+                )));
+            }
+            seen.push(w.url.as_str());
+            if parsed.scheme() == "http" {
+                tracing::warn!("watch url {} is plain http — LAN use only (D-03)", w.url);
+            }
+            out.push(ResolvedWatch {
+                source_id: w.url.clone(),
+                url: parsed,
+                username: w.username.clone(),
+                password: w.password.clone(),
+                interval: std::time::Duration::from_secs(w.interval_secs),
+                depth_cap: w.depth_cap,
+                extensions: w
+                    .extensions
+                    .iter()
+                    .map(|e| e.trim().trim_start_matches('.').to_lowercase())
+                    .collect(),
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -636,5 +729,127 @@ mod tests {
         assert_eq!(cfg.watch[0].interval_secs, 60);
         assert_eq!(cfg.watch[0].depth_cap, 2);
         assert_eq!(cfg.watch[0].extensions, ["md", "epub"]);
+    }
+
+    #[test]
+    fn zero_interval_rejected() {
+        // WR-02 parity: 0 would hot-loop the poller — reject at resolve.
+        let cfg: FileConfig =
+            toml::from_str("[[watch]]\nurl = \"https://nas.lan/dav/\"\ninterval_secs = 0\n")
+                .expect("parses");
+        let err = cfg
+            .resolve()
+            .expect_err("interval_secs = 0 must be rejected");
+        assert!(
+            err.to_string().contains("interval_secs"),
+            "error must name the offending key: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_depth_cap_rejected() {
+        // WR-02 parity: 0 would walk nothing — reject at resolve.
+        let cfg: FileConfig =
+            toml::from_str("[[watch]]\nurl = \"https://nas.lan/dav/\"\ndepth_cap = 0\n")
+                .expect("parses");
+        let err = cfg.resolve().expect_err("depth_cap = 0 must be rejected");
+        assert!(
+            err.to_string().contains("depth_cap"),
+            "error must name the offending key: {err}"
+        );
+    }
+
+    #[test]
+    fn watch_url_rejects_bad_forms() {
+        // D-03: trusted hosts, but the URL must still parse, be http(s), and
+        // carry no userinfo (creds in URLs leak via reqwest error Display).
+        for bad in ["ftp://x/", "https://user:pass@host/", "not a url"] {
+            let cfg: FileConfig =
+                toml::from_str(&format!("[[watch]]\nurl = \"{bad}\"\n")).expect("parses");
+            let err = cfg
+                .resolve()
+                .expect_err("watch url {bad:?} must be rejected");
+            assert!(
+                err.to_string().contains("watch"),
+                "error must name the watch section: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn watch_requires_whole_credentials() {
+        // WR-02 parity: half-set basic-auth is a config error, never a silent no-auth poll.
+        let cfg: FileConfig =
+            toml::from_str("[[watch]]\nurl = \"https://nas.lan/dav/\"\nusername = \"saussu\"\n")
+                .expect("parses");
+        let err = cfg
+            .resolve()
+            .expect_err("username without password must be rejected");
+        assert!(
+            err.to_string().contains("username"),
+            "error must name credentials: {err}"
+        );
+        let cfg: FileConfig =
+            toml::from_str("[[watch]]\nurl = \"https://nas.lan/dav/\"\npassword = \"solo\"\n")
+                .expect("parses");
+        cfg.resolve()
+            .expect_err("password without username must be rejected");
+    }
+
+    #[test]
+    fn duplicate_watch_urls_rejected() {
+        // source_id is the url verbatim (state key) — duplicates collide.
+        let cfg: FileConfig = toml::from_str(
+            "[[watch]]\nurl = \"https://nas.lan/dav/\"\n[[watch]]\nurl = \"https://nas.lan/dav/\"\n",
+        )
+        .expect("parses");
+        let err = cfg
+            .resolve()
+            .expect_err("duplicate watch urls must be rejected");
+        assert!(
+            err.to_string().contains("duplicate"),
+            "error must name the collision: {err}"
+        );
+    }
+
+    #[test]
+    fn watch_resolves_to_runtime_list() {
+        let cfg: FileConfig = toml::from_str(
+            "[[watch]]\nurl = \"https://nas.lan/dav/\"\nextensions = [\".PDF\", \"Md\"]\n\
+             [[watch]]\nurl = \"http://192.168.1.5/dav/\"\n",
+        )
+        .expect("parses");
+        let rt = cfg.resolve().expect("resolve");
+        assert_eq!(rt.watch.len(), 2);
+        // source_id = url verbatim (Phase 3 URL-as-source_id convention).
+        assert_eq!(rt.watch[0].source_id, "https://nas.lan/dav/");
+        assert_eq!(rt.watch[0].url.as_str(), "https://nas.lan/dav/");
+        assert_eq!(rt.watch[0].interval, std::time::Duration::from_secs(300));
+        assert_eq!(rt.watch[0].depth_cap, 4);
+        // extensions normalized: lowercased, dot-stripped.
+        assert_eq!(rt.watch[0].extensions, ["pdf", "md"]);
+        // D-03: plain http resolves (LAN trusted) with a WARN, not an error.
+        assert_eq!(rt.watch[1].source_id, "http://192.168.1.5/dav/");
+    }
+
+    #[test]
+    fn watch_password_never_in_debug() {
+        // T12 mirror of debug_output_never_leaks_api_key (D-02).
+        let cfg: FileConfig = toml::from_str(
+            "[[watch]]\nurl = \"https://nas.lan/dav/\"\nusername = \"saussu\"\npassword = \"test-pass-9f3a\"\n",
+        )
+        .expect("parses");
+        let rt = cfg.resolve().expect("resolve");
+        let rendered = format!("{rt:?}");
+        assert!(
+            !rendered.contains("test-pass-9f3a"),
+            "watch password leaked into RuntimeConfig Debug: {rendered}"
+        );
+        assert!(
+            rendered.contains("***"),
+            "Debug must redact as *** : {rendered}"
+        );
+        assert!(!format!("{cfg:?}").contains("test-pass-9f3a"));
+        assert!(!format!("{:?}", cfg.watch[0]).contains("test-pass-9f3a"));
     }
 }

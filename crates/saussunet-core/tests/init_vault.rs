@@ -246,6 +246,7 @@ async fn boot_refuses_db_inside_vault_root() {
         pipeline_min_sources: 2,
         pipeline_max_upload_bytes: 26_214_400,
         pipeline_max_fetch_bytes: 5_242_880,
+        watch: vec![],
     };
     let err = boot(&rt).await.expect_err("must refuse db inside vault");
     assert!(err.to_string().contains("T-01-01"), "error: {err}");

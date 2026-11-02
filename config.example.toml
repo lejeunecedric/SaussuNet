@@ -40,3 +40,15 @@ min_sources = 2
 max_upload_bytes = 26214400
 # Fetch cap for URL ingestion (5 MiB).
 max_fetch_bytes = 5242880
+
+# [[watch]]
+# WebDAV folder polled continuously (SRCC-01). url is trusted (LAN private IPs
+# allowed, D-03); https strongly encouraged, http:// logs a warning.
+# url = "https://nas.lan/dav/vault-inbox/"
+# username = "saussu"
+# password = "…"            # never commit; SecretString — never logged (D-02)
+# interval_secs = 300       # poll interval (D-10)
+# depth_cap = 4             # PROPFIND walk depth cap (D-04)
+# extensions = ["md", "txt", "pdf"]   # ingest allowlist (D-08)
+# Env override (SAUSSUNET_WATCH__<N>__PASSWORD) is deferred — v1 keeps watch
+# secrets in this gitignored file only.
