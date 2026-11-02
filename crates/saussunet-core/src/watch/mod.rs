@@ -178,6 +178,10 @@ async fn poll_inner(
 
     let mut lines: Vec<String> = Vec::new();
     let mut enqueued = 0usize;
+    // H1 (04 review): a per-file failure is recorded and the loop CONTINUES —
+    // one bad file must never wedge the source (files sorting after it would
+    // never be ingested) nor drop the log lines of already-applied deltas.
+    let mut file_err: Option<String> = None;
     for delta in deltas {
         match delta {
             delta @ (WatchDelta::Added(_) | WatchDelta::Changed(_)) => {
@@ -194,8 +198,18 @@ async fn poll_inner(
                     .iter()
                     .find(|s| s.path == entry.path)
                     .and_then(|s| s.sha256.as_deref());
-                if apply_file_delta(&ctx, &entry, prior_sha, verb, &mut lines).await? {
-                    enqueued += 1;
+                match apply_file_delta(&ctx, &entry, prior_sha, verb, &mut lines).await {
+                    Ok(true) => enqueued += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        // D-11 hygiene: the error surface is pre-sanitized;
+                        // strip newlines from the server-influenced path too.
+                        let msg = sanitize_line(&e.to_string());
+                        tracing::debug!("watch: {verb} {} failed: {msg}", sanitize_line(&entry.path));
+                        if file_err.is_none() {
+                            file_err = Some(format!("{verb} {} failed: {msg}", sanitize_line(&entry.path)));
+                        }
+                    }
                 }
             }
             WatchDelta::Skipped(w) => {
@@ -239,13 +253,15 @@ async fn poll_inner(
     }
 
     // log.md discipline: ONE append_entry call per poll, only when something
-    // happened — a no-op poll is completely silent (T9).
+    // happened — a no-op poll is completely silent (T9). This runs even when a
+    // per-file delta failed (H1): the applied deltas' lines are flushed
+    // BEFORE the poll-level Err so they are never lost.
     if !lines.is_empty() {
         let header = format!("## [{}] update | Watch", Utc::now().format("%Y-%m-%d"));
         vault::log::append_entry(vault, &header, &lines).await?;
     }
 
-    if let Some(msg) = walk_err {
+    if let Some(msg) = walk_err.or(file_err) {
         return Err(CoreError::Dav(msg));
     }
     Ok(enqueued)
@@ -372,6 +388,11 @@ async fn apply_sync_report(ctx: &DeltaCtx<'_>, report: &dav::SyncReport) -> Resu
             .await?;
     }
     let files: Vec<WalkEntry> = items.into_iter().filter(|w| !w.is_dir).collect();
+    // H1 (04 review): same per-file isolation as the walk loop — a failing
+    // file is recorded, the remaining deltas still apply, and `lines` is
+    // flushed before the Err (the token does NOT advance, so the failed file
+    // replays next poll; the sha256 gate absorbs the applied ones).
+    let mut file_err: Option<String> = None;
     for delta in diff_walk(&files, &state, &src.extensions) {
         match delta {
             delta @ (WatchDelta::Added(_) | WatchDelta::Changed(_)) => {
@@ -388,8 +409,16 @@ async fn apply_sync_report(ctx: &DeltaCtx<'_>, report: &dav::SyncReport) -> Resu
                     .iter()
                     .find(|s| s.path == entry.path)
                     .and_then(|s| s.sha256.as_deref());
-                if apply_file_delta(ctx, &entry, prior_sha, verb, &mut lines).await? {
-                    enqueued += 1;
+                match apply_file_delta(ctx, &entry, prior_sha, verb, &mut lines).await {
+                    Ok(true) => enqueued += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        let msg = sanitize_line(&e.to_string());
+                        tracing::debug!("watch sync: {verb} {} failed: {msg}", sanitize_line(&entry.path));
+                        if file_err.is_none() {
+                            file_err = Some(format!("sync {verb} {} failed: {msg}", sanitize_line(&entry.path)));
+                        }
+                    }
                 }
             }
             WatchDelta::Skipped(w) => {
@@ -435,6 +464,11 @@ async fn apply_sync_report(ctx: &DeltaCtx<'_>, report: &dav::SyncReport) -> Resu
         let header = format!("## [{}] update | Watch", Utc::now().format("%Y-%m-%d"));
         vault::log::append_entry(vault, &header, &lines).await?;
     }
+    // H1: flush the applied deltas' lines first, THEN surface the failure —
+    // try_sync_poll's `?` keeps the token frozen so the failed file replays.
+    if let Some(msg) = file_err {
+        return Err(CoreError::Dav(msg));
+    }
     Ok(enqueued)
 }
 
@@ -458,6 +492,38 @@ async fn apply_file_delta(
         max_fetch_bytes,
         now,
     } = *ctx;
+    let filename = entry
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&entry.path)
+        .to_string();
+    // H1 dotfile edge: a name like ".md" has an EMPTY stem — the pipeline
+    // sanitizer refuses it, which would fail this file forever and (before
+    // the H1 catch) wedge every later file. Note it once as a skip instead:
+    // the marker row (sha256 NULL) suppresses repeat notes like D-08 does.
+    if filename
+        .rsplit_once('.')
+        .is_some_and(|(stem, _)| stem.is_empty())
+    {
+        lines.push(format!(
+            "- skipped (empty file stem): {}",
+            sanitize_line(&entry.path)
+        ));
+        store
+            .upsert_watch_row(
+                vault.id,
+                &src.source_id,
+                &entry.path,
+                false,
+                entry.etag.as_deref(),
+                entry.size,
+                None,
+                now,
+            )
+            .await?;
+        return Ok(false);
+    }
     let bytes = client.get_bytes(&entry.path, max_fetch_bytes).await?;
     let sha = crate::pipeline::fetch::sha256_hex(&bytes);
     // D-07 sha256 backstop: identical bytes under a rotated (weak) etag
@@ -477,12 +543,6 @@ async fn apply_file_delta(
             .await?;
         return Ok(false);
     }
-    let filename = entry
-        .path
-        .rsplit('/')
-        .next()
-        .unwrap_or(&entry.path)
-        .to_string();
     let ext = filename
         .rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase())

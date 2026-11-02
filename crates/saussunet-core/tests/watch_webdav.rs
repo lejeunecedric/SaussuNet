@@ -73,6 +73,9 @@ pub struct StubHandle {
     /// 04-05 knob: when set, the NEXT PROPFIND answers 500 once (T7 walk
     /// failure), then the flag clears itself.
     fail_propfind: Arc<AtomicBool>,
+    /// H1 regression knob: GETs whose decoded path is in this set answer 500
+    /// PERSISTENTLY (a file that fails every tick — the source-wedging case).
+    fail_gets: Arc<Mutex<Vec<String>>>,
 }
 
 impl StubHandle {
@@ -110,6 +113,10 @@ impl StubHandle {
     pub fn fail_next_propfind(&self) {
         self.fail_propfind.store(true, Ordering::SeqCst);
     }
+    /// H1: every GET of `path` (tree key, no leading '/') answers 500 forever.
+    pub fn fail_get(&self, path: &str) {
+        self.fail_gets.lock().unwrap().push(path.to_string());
+    }
 }
 
 /// Start the stub; returns its base URL (`http://127.0.0.1:<port>/`) + handle.
@@ -124,11 +131,13 @@ pub fn stub_webdav() -> (String, StubHandle) {
         posts: Arc::new(AtomicUsize::new(0)),
     };
     let fail_propfind = Arc::new(AtomicBool::new(false));
-    let (tree_t, log_t, sync_t, fail_t) = (
+    let fail_gets: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (tree_t, log_t, sync_t, fail_t, fail_gets_t) = (
         Arc::clone(&tree),
         Arc::clone(&log),
         sync.clone(),
         Arc::clone(&fail_propfind),
+        Arc::clone(&fail_gets),
     );
     std::thread::spawn(move || loop {
         let Ok((mut stream, _)) = listener.accept() else {
@@ -138,8 +147,9 @@ pub fn stub_webdav() -> (String, StubHandle) {
         let log = Arc::clone(&log_t);
         let sync = sync_t.clone();
         let fail_propfind = Arc::clone(&fail_t);
+        let fail_gets = Arc::clone(&fail_gets_t);
         std::thread::spawn(move || {
-            let _ = handle_conn(&mut stream, &tree, &log, &sync, &fail_propfind);
+            let _ = handle_conn(&mut stream, &tree, &log, &sync, &fail_propfind, &fail_gets);
         });
     });
     (
@@ -149,6 +159,7 @@ pub fn stub_webdav() -> (String, StubHandle) {
             log,
             sync,
             fail_propfind,
+            fail_gets,
         },
     )
 }
@@ -159,6 +170,7 @@ fn handle_conn(
     log: &Mutex<ReqLog>,
     sync: &StubSync,
     fail_propfind: &AtomicBool,
+    fail_gets: &Mutex<Vec<String>>,
 ) -> std::io::Result<()> {
     // Read headers until \r\n\rn, then exactly Content-Length bytes.
     let mut buf = Vec::new();
@@ -212,7 +224,14 @@ fn handle_conn(
                 propfind_response(tree, &raw_path, &path)
             }
         }
-        "GET" => get_response(tree, &path),
+        "GET" => {
+            if fail_gets.lock().unwrap().iter().any(|p| p == path.trim_start_matches('/')) {
+                // H1: persistent per-file GET failure (the wedging case).
+                (500, vec![], b"boom".to_vec())
+            } else {
+                get_response(tree, &path)
+            }
+        }
         "POST" => {
             // RFC 6578 sync-collection (POST-as-REPORT). Bodies already
             // land in the request log — tests assert on recorded bodies.
@@ -1496,4 +1515,143 @@ async fn stale_token_resyncs_not_latches() {
         !reqs.iter().any(|(m, ..)| m == "PROPFIND"),
         "resync stays on the sync path: {reqs:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 04 review fix H1 — a per-file failure must not wedge the source nor drop
+// log.md lines already accumulated for successful deltas.
+// ---------------------------------------------------------------------------
+
+/// H1(i)+(ii) walk path: b.md fails its GET persistently; a.md (before) and
+/// c.md (after) must still enqueue, their log lines must be flushed even
+/// though the poll returns Err, and the failure is recorded in last_error.
+#[tokio::test]
+async fn failing_file_does_not_wedge_the_walk() {
+    let (base, stub) = stub_webdav();
+    stub.insert("a.md", b"good a", "\"a\"");
+    stub.insert("b.md", b"bad b", "\"b\"");
+    stub.insert("c.md", b"good c", "\"c\"");
+    stub.fail_get("b.md");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+
+    poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect_err("failing file must still surface as poll Err");
+
+    // a.md and c.md enqueue despite b.md failing in the middle of the loop.
+    let jobs = store.list_jobs(vault_id, Some("pending")).await.unwrap();
+    assert_eq!(jobs.len(), 2, "a.md + c.md must enqueue despite b.md");
+
+    // Log lines for the successful deltas are flushed BEFORE the Err.
+    let log = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
+    assert!(log.contains("added: a.md"), "prior delta logged: {log}");
+    assert!(log.contains("added: c.md"), "later delta logged: {log}");
+    assert!(!log.contains("added: b.md"), "failed file not logged: {log}");
+
+    // The failure is recorded (sanitized) for the operator.
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    let err = sync.last_error.expect("last_error recorded");
+    assert!(err.contains("b.md"), "last_error names the failing file: {err}");
+
+    // Next poll: b.md still fails, but a.md/c.md are NOT re-enqueued —
+    // their state rows were written, so only b.md replays.
+    poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect_err("b.md still failing");
+    assert_eq!(
+        store.list_jobs(vault_id, None).await.unwrap().len(),
+        2,
+        "no re-enqueue storm for the applied files"
+    );
+}
+
+/// H1 sync path: a failing file inside a sync report must not drop the log
+/// lines of the deltas applied before it, and the token must NOT advance
+/// (the delta replays next poll, absorbed by the sha256 gate).
+#[tokio::test]
+async fn sync_failing_file_flushes_log_and_holds_token() {
+    let (base, stub) = stub_webdav();
+    stub.insert("a.md", b"good a", "\"a\"");
+    stub.insert("b.md", b"bad b", "\"b\"");
+    stub.fail_get("b.md");
+    stub.set_sync_mode(SyncMode::Enabled {
+        script: vec![SyncReply {
+            items: vec![
+                ("a.md".to_string(), ItemStatus::Ok),
+                ("b.md".to_string(), ItemStatus::Ok),
+            ],
+            token: "http://stub/sync/1".to_string(),
+        }],
+    });
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+
+    poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect_err("failing sync file must surface as poll Err");
+
+    let jobs = store.list_jobs(vault_id, Some("pending")).await.unwrap();
+    assert_eq!(jobs.len(), 1, "a.md enqueued despite b.md failing");
+    let log = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
+    assert!(log.contains("added: a.md"), "successful delta logged: {log}");
+
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    assert!(
+        sync.token.is_none(),
+        "token must not advance when a delta failed: {sync:?}"
+    );
+
+    // Replay: a.md absorbed by the sha256 gate (no re-enqueue), b.md fails
+    // again — poll still Err, still exactly one job.
+    poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect_err("b.md still failing");
+    assert_eq!(store.list_jobs(vault_id, None).await.unwrap().len(), 1);
+}
+
+/// H1 dotfile edge: a file literally named `.md` has an empty stem which the
+/// pipeline sanitizer refuses. It must become a once-only skip note, not a
+/// fatal per-file error that wedges every later file.
+#[tokio::test]
+async fn dotfile_md_is_skipped_not_fatal() {
+    let (base, stub) = stub_webdav();
+    stub.insert(".md", b"dot", "\"d\"");
+    stub.insert("ok.md", b"ok", "\"o\"");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("poll must not fail on a dotfile"),
+        1,
+        "ok.md enqueues; .md is skipped"
+    );
+    let log = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
+    assert!(
+        log.contains("skipped (empty file stem): .md"),
+        "dotfile skip note: {log}"
+    );
+    assert!(log.contains("added: ok.md"), "later file applied: {log}");
+
+    // Marker row written → second poll is a silent no-op (note logged once).
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("second poll"),
+        0
+    );
+    let log2 = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
+    assert_eq!(
+        log2.lines().filter(|l| l.contains("empty file stem")).count(),
+        1,
+        "skip note logged exactly once: {log2}"
+    );
+    assert_eq!(store.list_jobs(vault_id, None).await.unwrap().len(), 1);
 }
