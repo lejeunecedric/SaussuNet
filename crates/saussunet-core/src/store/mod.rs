@@ -10,12 +10,14 @@ mod pages;
 mod proposals;
 mod sync_state;
 mod vaults;
+mod watch_state;
 
 pub use entities::EntityRecord;
 pub use jobs::{Job, JobOutcome, BACKOFF_SECS, MAX_RETRIES};
 pub use proposals::{Proposal, ProposalSummary};
 pub use sync_state::SyncState;
 pub use vaults::VaultRow;
+pub use watch_state::WatchRow;
 
 use std::path::Path;
 use std::str::FromStr;
