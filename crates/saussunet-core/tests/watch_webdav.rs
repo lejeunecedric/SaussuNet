@@ -1102,3 +1102,88 @@ async fn interval_loop_polls_on_spawn_and_repeats() {
         "aborted watcher must make no further requests"
     );
 }
+/// T6 (SRCC-02 headline): a FULL restart on a FILE-BACKED SQLite DB resumes
+/// watching with zero re-scan. poll → drop(store) → reopen the same path →
+/// poll again ⇒ zero new jobs and `last_poll_at` advanced; then a genuinely
+/// new file is still picked up (resume is live, not frozen). `boot_open` on a
+/// tempdir `data_dir` is the production sequence — the DB is a real file, so
+/// a pass cannot be faked by an in-memory store.
+#[tokio::test]
+async fn restart_resumes_without_rescan() {
+    let (base, stub) = stub_webdav();
+    stub.insert("note.md", b"hello", "\"n1\"");
+    let tmp = TempDir::new().expect("tempdir");
+    let toml = format!(
+        "[storage]\ndata_dir = \"{}\"\n\n[vault]\nid = 1\nname = \"main\"\n\n[[watch]]\nurl = \"{base}\"\ninterval_secs = 300\n",
+        tmp.path().display()
+    );
+    let cfg: FileConfig = toml::from_str(&toml).expect("config parses");
+    let rt = cfg.resolve().expect("resolve");
+    assert!(
+        rt.db_path.starts_with(tmp.path()),
+        "T6 requires a file-backed DB, got {}",
+        rt.db_path.display()
+    );
+    let src = rt.watch.first().expect("one watch").clone();
+
+    // --- boot #1: first poll enqueues the one file ---
+    let (store, vault) = boot_open(&rt).await.expect("boot 1");
+    let (store, vault) = (Arc::new(store), Arc::new(vault));
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("first poll"),
+        1
+    );
+    let jobs_before = store.list_jobs(1, None).await.unwrap().len();
+    let sync_before = store
+        .get_sync_state(1, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row")
+        .last_poll_at
+        .expect("last_poll_at after first poll");
+
+    // --- full process restart: everything dropped, same paths reopened ---
+    drop(store);
+    drop(vault);
+    let (store, vault) = boot_open(&rt).await.expect("boot 2 (restart)");
+    let (store, vault) = (Arc::new(store), Arc::new(vault));
+
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("poll after restart"),
+        0,
+        "restart must NOT re-scan unchanged files (SRCC-02)"
+    );
+    assert_eq!(
+        store.list_jobs(1, None).await.unwrap().len(),
+        jobs_before,
+        "zero new jobs across the restart"
+    );
+    let sync_after = store
+        .get_sync_state(1, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row")
+        .last_poll_at
+        .expect("last_poll_at after restart poll");
+    assert!(
+        sync_after > sync_before,
+        "last_poll_at must advance across restart: {sync_before} -> {sync_after}"
+    );
+
+    // Resume is LIVE, not frozen: a new file after restart enqueues exactly 1.
+    stub.insert("later.md", b"later", "\"l1\"");
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("post-restart poll"),
+        1
+    );
+    assert_eq!(
+        store.list_jobs(1, None).await.unwrap().len(),
+        jobs_before + 1
+    );
+}

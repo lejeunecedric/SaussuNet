@@ -151,8 +151,13 @@ async fn boot() -> anyhow::Result<()> {
             max_concurrency: rt.llm_max_concurrency,
             ..Default::default()
         };
-        let handles =
-            saussunet_core::queue::spawn_workers(store, provider, vault, rt.vault_id, worker_cfg);
+        let handles = saussunet_core::queue::spawn_workers(
+            store.clone(),
+            provider,
+            vault.clone(),
+            rt.vault_id,
+            worker_cfg,
+        );
         println!(
             "queue ready: provider={} workers={}",
             rt.llm_provider,
@@ -166,6 +171,25 @@ async fn boot() -> anyhow::Result<()> {
         Vec::new()
     };
 
+    // Phase 4 (D-12): one watcher task per configured [[watch]] source. Runs
+    // even under mock provider — the durable queue is the buffer (04-04
+    // decision): jobs accumulate as pending until a real provider drains.
+    let watch_handles: Vec<_> = rt
+        .watch
+        .iter()
+        .map(|w| {
+            saussunet_core::watch::spawn_watcher(
+                store.clone(),
+                vault.clone(),
+                w.clone(),
+                rt.pipeline_max_fetch_bytes,
+            )
+        })
+        .collect();
+    if !watch_handles.is_empty() {
+        println!("watch ready: {} source(s)", watch_handles.len());
+    }
+
     // Third long-lived task (plan 03-02): axum serve on the configured bind,
     // routes nested under the base path (D-13).
     let listener = tokio::net::TcpListener::bind(&rt.bind).await?;
@@ -176,10 +200,14 @@ async fn boot() -> anyhow::Result<()> {
     });
     println!("http ready: http://{}{}/ingest", rt.bind, rt.base_path);
 
-    // NO ANALOG precedent: first long-lived mode. Ctrl-C → abort serve + workers.
+    // NO ANALOG precedent: first long-lived mode. Ctrl-C → abort serve + workers
+    // + watchers (D-12: no new teardown path — watchers ride the same loop).
     tokio::signal::ctrl_c().await?;
     serve.abort();
     for h in handles {
+        h.abort();
+    }
+    for h in watch_handles {
         h.abort();
     }
     println!("shutdown complete");
