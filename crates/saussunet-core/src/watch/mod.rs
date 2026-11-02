@@ -24,8 +24,10 @@ use crate::vault::{self, Vault};
 use dav::DavClient;
 use diff::{diff_walk, StateEntry, WalkEntry, WatchDelta};
 
-/// One poll of one source: depth-capped BFS walk → diff vs watch_state →
-/// download + enqueue deltas → removals (complete walks only). Returns the
+/// One poll of one source: RFC 6578 sync-collection when the server
+/// supports it (token round-trip, stale-token re-sync, latch on failure),
+/// otherwise a depth-capped BFS walk → diff vs watch_state → download +
+/// enqueue deltas → removals (complete walks only). Returns the
 /// count of enqueued jobs. Errors are returned, never panicked, and recorded
 /// as `sync_state.last_error` (sanitized); the 04-06 interval loop owns WARN
 /// logging (D-11: no secrets, no response bodies in logs). `poll_once`
@@ -73,6 +75,28 @@ async fn poll_inner(
     now: &str,
 ) -> Result<usize> {
     let client = DavClient::new(src)?;
+    // Shared per-poll context for delta application (sync + walk paths).
+    let ctx = DeltaCtx {
+        store,
+        vault,
+        src,
+        client: &client,
+        max_fetch_bytes,
+        now,
+    };
+
+    // --- RFC 6578 sync-collection attempt (D-05, 04-07) -------------------
+    // Discovery is try-and-fallback: the RFC adds no DAV: compliance token,
+    // so we simply try. A latched `sync_unsupported` skips this forever.
+    let sync_state = store.get_sync_state(vault.id, &src.source_id).await?;
+    if !sync_state.as_ref().is_some_and(|s| s.sync_unsupported) {
+        let stored = sync_state.and_then(|s| s.token).filter(|t| !t.is_empty());
+        if let Some(n) = try_sync_poll(&ctx, stored.as_deref()).await? {
+            return Ok(n);
+        }
+        // try_sync_poll latched sync_unsupported — fall through to the walk
+        // (this poll AND every future one, D-05).
+    }
 
     // --- BFS walk (D-04, SRCC-01): one Depth:1 PROPFIND per collection,
     // root at depth 0, stop descending once depth + 1 > depth_cap (cap 4 ⇒
@@ -166,76 +190,13 @@ async fn poll_inner(
                     WatchDelta::Added(w) | WatchDelta::Changed(w) => w,
                     _ => unreachable!("matched above"),
                 };
-                let bytes = client.get_bytes(&entry.path, max_fetch_bytes).await?;
-                let sha = crate::pipeline::fetch::sha256_hex(&bytes);
-                // D-07 sha256 backstop: identical bytes under a rotated
-                // (weak) etag update the row only — no job, no log line.
                 let prior_sha = state
                     .iter()
                     .find(|s| s.path == entry.path)
                     .and_then(|s| s.sha256.as_deref());
-                if prior_sha == Some(sha.as_str()) {
-                    store
-                        .upsert_watch_row(
-                            vault.id,
-                            &src.source_id,
-                            &entry.path,
-                            false,
-                            entry.etag.as_deref(),
-                            entry.size,
-                            Some(&sha),
-                            now,
-                        )
-                        .await?;
-                    continue;
+                if apply_file_delta(&ctx, &entry, prior_sha, verb, &mut lines).await? {
+                    enqueued += 1;
                 }
-                let filename = entry
-                    .path
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&entry.path)
-                    .to_string();
-                let ext = filename
-                    .rsplit_once('.')
-                    .map(|(_, e)| e.to_ascii_lowercase())
-                    .unwrap_or_default();
-                // D-08 routing: .md/.txt → ingest_raw, .pdf → ingest_pdf. diff_walk
-                // already dropped anything outside the allowlist (Skipped), so the
-                // else branch only fires for custom allowlist entries (no job).
-                if ext == "md" || ext == "txt" {
-                    let source_hint =
-                        format!("{}/{}", src.url.as_str().trim_end_matches('/'), entry.path);
-                    pipeline::submit_raw(
-                        store,
-                        vault,
-                        &bytes,
-                        &filename,
-                        &source_hint,
-                        max_fetch_bytes,
-                    )
-                    .await?;
-                } else if ext == "pdf" {
-                    pipeline::submit_pdf(store, vault, &bytes, &filename, max_fetch_bytes).await?;
-                } else {
-                    continue;
-                }
-                enqueued += 1;
-                // crash-safety (Pitfall 2): durable job first, state second.
-                // Worst case after a crash between the two = one duplicate
-                // enqueue, absorbed by the worker's sha256 no-op.
-                store
-                    .upsert_watch_row(
-                        vault.id,
-                        &src.source_id,
-                        &entry.path,
-                        false,
-                        entry.etag.as_deref(),
-                        entry.size,
-                        Some(&sha),
-                        now,
-                    )
-                    .await?;
-                lines.push(format!("- {verb}: {}", sanitize_line(&entry.path)));
             }
             WatchDelta::Skipped(w) => {
                 // D-08 skip-note: log ONCE — the state row is the
@@ -288,6 +249,280 @@ async fn poll_inner(
         return Err(CoreError::Dav(msg));
     }
     Ok(enqueued)
+}
+
+/// Shared per-poll context for delta application — one bundle for BOTH the
+/// walk and the sync paths so the two call sites stay honest about the
+/// crash-safe order (they share `apply_file_delta` verbatim).
+#[derive(Clone, Copy)]
+struct DeltaCtx<'a> {
+    store: &'a Store,
+    vault: &'a Arc<Vault>,
+    src: &'a ResolvedWatch,
+    client: &'a DavClient,
+    max_fetch_bytes: u64,
+    now: &'a str,
+}
+
+/// Attempt one RFC 6578 sync-collection poll (D-05 try-and-fallback).
+/// `Ok(Some(n))` = sync worked, n jobs enqueued. `Ok(None)` = the server
+/// does not support sync — `sync_unsupported` is now latched and the caller
+/// must run the PROPFIND walk (this poll and every future one). `Err` =
+/// sync IS supported but this poll failed; the token is NOT advanced, so
+/// the next tick retries the same delta.
+async fn try_sync_poll(ctx: &DeltaCtx<'_>, stored_token: Option<&str>) -> Result<Option<usize>> {
+    let DeltaCtx {
+        store,
+        vault,
+        src,
+        client,
+        ..
+    } = *ctx;
+    let report = match client.sync_collection("", stored_token).await {
+        Ok(r) => r,
+        Err(first) if stored_token.is_some() => {
+            // Pitfall 5: stored tokens can expire (RFC 6578 §3.1). Retry
+            // ONCE with an empty token (full re-sync — the sha256 gate makes
+            // it cheap) before ANY latching.
+            tracing::debug!(
+                "watch sync: report with stored token failed ({first}); retrying with empty token"
+            );
+            match client.sync_collection("", None).await {
+                Ok(r) => r,
+                Err(second) => {
+                    tracing::debug!(
+                        "watch sync: empty-token resync also failed ({second}); latching sync_unsupported"
+                    );
+                    store
+                        .set_sync_unsupported(vault.id, &src.source_id, true)
+                        .await?;
+                    return Ok(None);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                "watch sync: sync-collection unsupported ({e}); latching sync_unsupported"
+            );
+            store
+                .set_sync_unsupported(vault.id, &src.source_id, true)
+                .await?;
+            return Ok(None);
+        }
+    };
+    let enqueued = apply_sync_report(ctx, &report).await?;
+    // The token advances ONLY after the delta was fully applied: a crash
+    // between apply and token replays the same delta next poll, absorbed by
+    // the sha256 gate — the same at-least-once order as Pitfall 2.
+    store
+        .set_sync_token(vault.id, &src.source_id, report.token.as_deref())
+        .await?;
+    Ok(Some(enqueued))
+}
+
+/// Apply one sync-report delta. Shares the walk's gate/submit/upsert path
+/// via `apply_file_delta`. CRITICAL (threat model): a sync delta is NOT a
+/// complete universe — walk-style diff-based removals (Pitfall 3) must
+/// NEVER run here; deletions come only from explicit 404-status items.
+async fn apply_sync_report(ctx: &DeltaCtx<'_>, report: &dav::SyncReport) -> Result<usize> {
+    let DeltaCtx {
+        store,
+        vault,
+        src,
+        client: _,
+        max_fetch_bytes: _,
+        now,
+    } = *ctx;
+    let rows = store.list_watch_rows(vault.id, &src.source_id).await?;
+    let state: Vec<StateEntry> = rows
+        .iter()
+        .map(|r| StateEntry {
+            path: r.path.clone(),
+            etag: r.etag.clone(),
+            size: r.size,
+            is_dir: r.is_dir,
+            sha256: r.sha256.clone(),
+        })
+        .collect();
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut enqueued = 0usize;
+
+    // 200-status items = added/changed candidates (sync-level infinity
+    // reports the whole subtree, so paths may be nested).
+    let items: Vec<WalkEntry> = report
+        .entries
+        .iter()
+        .filter(|e| e.status == 200)
+        .map(WalkEntry::from)
+        .collect();
+    // Collections among them: state bookkeeping rows only, never enqueued.
+    for w in items.iter().filter(|w| w.is_dir) {
+        store
+            .upsert_watch_row(
+                vault.id,
+                &src.source_id,
+                &w.path,
+                true,
+                None,
+                None,
+                None,
+                now,
+            )
+            .await?;
+    }
+    let files: Vec<WalkEntry> = items.into_iter().filter(|w| !w.is_dir).collect();
+    for delta in diff_walk(&files, &state, &src.extensions) {
+        match delta {
+            delta @ (WatchDelta::Added(_) | WatchDelta::Changed(_)) => {
+                let verb = if matches!(delta, WatchDelta::Added(_)) {
+                    "added"
+                } else {
+                    "changed"
+                };
+                let entry = match delta {
+                    WatchDelta::Added(w) | WatchDelta::Changed(w) => w,
+                    _ => unreachable!("matched above"),
+                };
+                let prior_sha = state
+                    .iter()
+                    .find(|s| s.path == entry.path)
+                    .and_then(|s| s.sha256.as_deref());
+                if apply_file_delta(ctx, &entry, prior_sha, verb, &mut lines).await? {
+                    enqueued += 1;
+                }
+            }
+            WatchDelta::Skipped(w) => {
+                // Same once-only marker-row discipline as the walk (D-08).
+                if !state.iter().any(|s| s.path == w.path) {
+                    lines.push(format!(
+                        "- skipped (extension not allowlisted): {}",
+                        sanitize_line(&w.path)
+                    ));
+                    store
+                        .upsert_watch_row(
+                            vault.id,
+                            &src.source_id,
+                            &w.path,
+                            false,
+                            w.etag.as_deref(),
+                            w.size,
+                            None,
+                            now,
+                        )
+                        .await?;
+                }
+            }
+            WatchDelta::Removed(_) => {
+                // IGNORED by design: diff_walk's Removed means "in state,
+                // absent from THIS delta" — meaningless for a partial sync
+                // universe. Only explicit 404 items below remove state.
+            }
+        }
+    }
+
+    // 404-status items = server-reported deletions (free with sync, D-05).
+    // Same handling as walk removals: log line + state prune; vault pages
+    // are never touched (D-09).
+    for e in report.entries.iter().filter(|e| e.status == 404) {
+        store
+            .delete_watch_row(vault.id, &src.source_id, &e.path)
+            .await?;
+        lines.push(format!("- removed: {}", sanitize_line(&e.path)));
+    }
+
+    if !lines.is_empty() {
+        let header = format!("## [{}] update | Watch", Utc::now().format("%Y-%m-%d"));
+        vault::log::append_entry(vault, &header, &lines).await?;
+    }
+    Ok(enqueued)
+}
+
+/// Shared Added/Changed application for BOTH the walk and the sync path:
+/// GET → sha256 gate (D-07) → route + submit → state row upsert AFTER the
+/// durable job returned (Pitfall 2 crash-safe order). Returns `true` iff a
+/// job was enqueued — the sha256 gate and non-ingestible custom allowlist
+/// entries enqueue nothing.
+async fn apply_file_delta(
+    ctx: &DeltaCtx<'_>,
+    entry: &WalkEntry,
+    prior_sha: Option<&str>,
+    verb: &str,
+    lines: &mut Vec<String>,
+) -> Result<bool> {
+    let DeltaCtx {
+        store,
+        vault,
+        src,
+        client,
+        max_fetch_bytes,
+        now,
+    } = *ctx;
+    let bytes = client.get_bytes(&entry.path, max_fetch_bytes).await?;
+    let sha = crate::pipeline::fetch::sha256_hex(&bytes);
+    // D-07 sha256 backstop: identical bytes under a rotated (weak) etag
+    // update the row only — no job, no log line.
+    if prior_sha == Some(sha.as_str()) {
+        store
+            .upsert_watch_row(
+                vault.id,
+                &src.source_id,
+                &entry.path,
+                false,
+                entry.etag.as_deref(),
+                entry.size,
+                Some(&sha),
+                now,
+            )
+            .await?;
+        return Ok(false);
+    }
+    let filename = entry
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&entry.path)
+        .to_string();
+    let ext = filename
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    // D-08 routing: .md/.txt → ingest_raw, .pdf → ingest_pdf. diff_walk
+    // already dropped anything outside the allowlist (Skipped), so the
+    // else branch only fires for custom allowlist entries (no job).
+    if ext == "md" || ext == "txt" {
+        let source_hint = format!("{}/{}", src.url.as_str().trim_end_matches('/'), entry.path);
+        pipeline::submit_raw(
+            store,
+            vault,
+            &bytes,
+            &filename,
+            &source_hint,
+            max_fetch_bytes,
+        )
+        .await?;
+    } else if ext == "pdf" {
+        pipeline::submit_pdf(store, vault, &bytes, &filename, max_fetch_bytes).await?;
+    } else {
+        return Ok(false);
+    }
+    // crash-safety (Pitfall 2): durable job first, state second.
+    // Worst case after a crash between the two = one duplicate
+    // enqueue, absorbed by the worker's sha256 no-op.
+    store
+        .upsert_watch_row(
+            vault.id,
+            &src.source_id,
+            &entry.path,
+            false,
+            entry.etag.as_deref(),
+            entry.size,
+            Some(&sha),
+            now,
+        )
+        .await?;
+    lines.push(format!("- {verb}: {}", sanitize_line(&entry.path)));
+    Ok(true)
 }
 
 /// Log/state-line injection guard: untrusted server paths (and error text

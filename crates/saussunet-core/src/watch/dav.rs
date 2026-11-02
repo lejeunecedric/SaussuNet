@@ -15,11 +15,16 @@ use url::Url;
 use crate::config::{ResolvedWatch, SecretString};
 use crate::error::{CoreError, Result};
 
-use super::multistatus::{parse_multistatus, DavEntry};
+use super::multistatus::{extract_sync_token, parse_multistatus, DavEntry};
 
 /// Hard cap on multistatus response bodies, enforced BEFORE parsing
 /// (XML-bomb / memory DoS control — roxmltree is DOM-based).
 pub const MAX_MULTISTATUS_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Opaque sync-token size cap (04-07 threat model): the token is a
+/// server-controlled string persisted to SQLite and echoed back into a
+/// report body — bound it before storing.
+pub const MAX_SYNC_TOKEN_CHARS: usize = 4096;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 5;
@@ -31,6 +36,41 @@ const PROPFIND_BODY: &str = r#"<?xml version="1.0"?>
     <d:getetag/><d:getcontentlength/><d:resourcetype/>
   </d:prop>
 </d:propfind>"#;
+
+/// sync-collection request body (RFC 6578 §3.2 / RESEARCH protocol_notes),
+/// `{tok}` substituted per attempt. `sync-level: infinity` is the REPORT's
+/// level — one token per source at the root — NOT PROPFIND Depth, which
+/// stays 1 forever (SRCC-01 constrains PROPFIND only).
+fn sync_body(token: Option<&str>) -> String {
+    let tok = token.map(xml_escape).unwrap_or_default();
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<d:sync-collection xmlns:d="DAV:">
+  <d:sync-token>{tok}</d:sync-token>
+  <d:sync-level>infinity</d:sync-level>
+  <d:prop><d:getetag/><d:getcontentlength/></d:prop>
+</d:sync-collection>"#
+    )
+}
+
+/// Minimal XML text escape for the opaque token interpolated into the body.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// One RFC 6578 sync-collection report (POST-as-REPORT).
+#[derive(Debug)]
+pub struct SyncReport {
+    /// Per-item entries: `status == 200` added/changed, `status == 404`
+    /// removed (deletions come free with sync, D-05).
+    pub entries: Vec<DavEntry>,
+    /// Trailing `<d:sync-token>` — treated as an OPAQUE string, persisted
+    /// via `Store::set_sync_token`, never interpolated into a URL or command.
+    pub token: Option<String>,
+}
 
 /// One client per watch source. `base` is the watch root URL (trailing slash
 /// normalised — PROPFIND targets a collection); `auth` is applied
@@ -97,6 +137,53 @@ impl DavClient {
         })?;
         // root_path is the percent-ENCODED request path (parser decodes once).
         parse_multistatus(&xml, url.path())
+    }
+
+    /// RFC 6578 sync-collection as POST-as-REPORT (§3.2): `Depth: 0`,
+    /// sync-level infinity, stored-or-empty token. 207 is required — any
+    /// other status is an Err and the CALLER decides stale-token retry vs
+    /// `sync_unsupported` latch (D-05 try-and-fallback). Same size cap,
+    /// parser, and sanitized error surface as `propfind_children` (no forked
+    /// error format — credential hygiene, D-02).
+    pub async fn sync_collection(&self, rel: &str, token: Option<&str>) -> Result<SyncReport> {
+        let url = self.url_for(rel)?;
+        let target = display_target(&url);
+        let mut req = self
+            .client
+            .post(url.clone())
+            .header("Depth", "0")
+            .header(reqwest::header::CONTENT_TYPE, "application/xml");
+        if let Some((u, p)) = &self.auth {
+            req = req.basic_auth(u, Some(p.reveal()));
+        }
+        let resp = req.body(sync_body(token)).send().await.map_err(|e| {
+            CoreError::Dav(format!(
+                "{target}: sync-collection failed: {}",
+                err_kind(&e)
+            ))
+        })?;
+        if resp.status() != reqwest::StatusCode::MULTI_STATUS {
+            return Err(CoreError::Dav(format!(
+                "{target}: expected 207 Multi-Status, got {}",
+                resp.status()
+            )));
+        }
+        let bytes = read_capped(resp, MAX_MULTISTATUS_BYTES, &target).await?;
+        let xml = String::from_utf8(bytes).map_err(|_| {
+            CoreError::Dav(format!("{target}: multistatus body is not valid UTF-8"))
+        })?;
+        let entries = parse_multistatus(&xml, url.path())?;
+        let token = extract_sync_token(&xml);
+        // Opaque-string cap BEFORE persisting (threat model).
+        if token
+            .as_deref()
+            .is_some_and(|t| t.chars().count() > MAX_SYNC_TOKEN_CHARS)
+        {
+            return Err(CoreError::Dav(format!(
+                "{target}: sync-token exceeds the {MAX_SYNC_TOKEN_CHARS}-char opaque-string cap"
+            )));
+        }
+        Ok(SyncReport { entries, token })
     }
 
     /// GET with basic auth; aborts if the body exceeds `max_bytes` (streaming
