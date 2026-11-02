@@ -26,6 +26,7 @@ reqwest = { workspace = true }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
 url = { workspace = true }
+roxmltree = { workspace = true }
 readability = { workspace = true }
 htmd = { workspace = true }
 

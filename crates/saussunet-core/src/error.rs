@@ -65,6 +65,12 @@ pub enum CoreError {
     // jobs.error on purpose (LOUD failure, MoriNet mdbook pattern).
     #[error("missing required binary '{binary}': {hint}")]
     MissingBinary { binary: String, hint: String },
+
+    // Phase 4 (SRCC-01): WebDAV multistatus/sync-report parse failures. Carries
+    // only a short parse description — never the response body (untrusted XML,
+    // D-03 display-safety pattern).
+    #[error("WebDAV parse error: {0}")]
+    Dav(String),
 }
 
 /// Convenience alias used across the core crate (never `anyhow` in the lib).

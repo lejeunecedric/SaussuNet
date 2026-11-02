@@ -14,6 +14,7 @@ pub mod queue;
 pub mod reindex;
 pub mod store;
 pub mod vault;
+pub mod watch;
 
 use std::path::{Path, PathBuf};
 

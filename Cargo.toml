@@ -48,6 +48,11 @@ tempfile = "3"
 # `readability` was flagged dormant in STACK.md, but 03-CONTEXT D-05 locks the
 # choice — pinned to the latest published stable (0.3).
 url = "2"
+# Phase 4 watch parser (D-04/D-08): namespace-aware read-only DOM for DAV:
+# multistatus — the minimum that parses RFC 4918 correctly (no quick-xml
+# event state machine, no reqwest_dav reqwest-0.13 pin conflict — RESEARCH
+# stack decision). Pure Rust, no DTD fetching (XML-bomb inert).
+roxmltree = "0.21"
 readability = "0.3"
 htmd = "0.1"
 # HTTP server for the daemon's ingest endpoint (Phase 3, D-01). BINARY CRATE
