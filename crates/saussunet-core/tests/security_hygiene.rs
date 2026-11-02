@@ -260,8 +260,9 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Audit over the real sources: `SecretString::reveal()` may appear ONLY in
-/// `llm/openai_compat.rs` request construction, and no tracing call in the
-/// pipeline or HTTP code paths interpolates `payload_json` or `api_key`.
+/// `llm/openai_compat.rs` and `watch/dav.rs` request construction (04-04:
+/// the DavClient's sanctioned basic-auth call site), and no tracing call in
+/// the pipeline or HTTP code paths interpolates `payload_json` or `api_key`.
 #[test]
 fn no_secrets_in_log_paths() {
     let core_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -287,7 +288,7 @@ fn no_secrets_in_log_paths() {
                 .contains("reveal()")
         })
         .map(|f| f.display().to_string())
-        .filter(|p| !p.ends_with("llm/openai_compat.rs"))
+        .filter(|p| !(p.ends_with("llm/openai_compat.rs") || p.ends_with("watch/dav.rs")))
         .collect();
     assert!(
         offenders.is_empty(),
@@ -298,6 +299,12 @@ fn no_secrets_in_log_paths() {
             .expect("openai_compat exists")
             .contains("reveal()"),
         "sanctioned reveal() call site must still exist (audit is not vacuous)"
+    );
+    assert!(
+        std::fs::read_to_string(core_src.join("watch").join("dav.rs"))
+            .expect("watch/dav.rs exists")
+            .contains("reveal()"),
+        "sanctioned watch/dav.rs reveal() call site must still exist (audit is not vacuous)"
     );
 
     // 2. No tracing call in the pipeline / HTTP code paths interpolates the

@@ -24,12 +24,15 @@ struct StubFile {
     etag: String,
 }
 
+/// One recorded request: (method, decoded path, Depth header, body).
+pub type ReqLog = Vec<(String, String, Option<String>, String)>;
+
 /// Handle into the running stub. Tree keys are DECODED vault-relative paths;
 /// directory keys end with '/'.
 #[derive(Clone)]
 pub struct StubHandle {
     tree: Arc<Mutex<HashMap<String, StubFile>>>,
-    log: Arc<Mutex<Vec<(String, String, Option<String>, String)>>>,
+    log: Arc<Mutex<ReqLog>>,
     /// 04-07 knob (unused in 04-04): flip to make POST answer 207 instead of
     /// the D-05 fallback 400.
     sync_mode: Arc<AtomicBool>,
@@ -54,7 +57,7 @@ impl StubHandle {
         }
     }
     /// Recorded requests: (method, decoded path, Depth header, body).
-    pub fn requests(&self) -> Vec<(String, String, Option<String>, String)> {
+    pub fn requests(&self) -> ReqLog {
         self.log.lock().unwrap().clone()
     }
     #[allow(dead_code)]
@@ -68,8 +71,7 @@ pub fn stub_webdav() -> (String, StubHandle) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("stub binds");
     let addr = listener.local_addr().expect("stub addr");
     let tree: Arc<Mutex<HashMap<String, StubFile>>> = Arc::new(Mutex::new(HashMap::new()));
-    let log: Arc<Mutex<Vec<(String, String, Option<String>, String)>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let log: Arc<Mutex<ReqLog>> = Arc::new(Mutex::new(Vec::new()));
     let sync_mode = Arc::new(AtomicBool::new(false));
     let (tree_t, log_t, sync_t) = (Arc::clone(&tree), Arc::clone(&log), Arc::clone(&sync_mode));
     std::thread::spawn(move || loop {
@@ -96,7 +98,7 @@ pub fn stub_webdav() -> (String, StubHandle) {
 fn handle_conn(
     stream: &mut std::net::TcpStream,
     tree: &Mutex<HashMap<String, StubFile>>,
-    log: &Mutex<Vec<(String, String, Option<String>, String)>>,
+    log: &Mutex<ReqLog>,
     sync_mode: &AtomicBool,
 ) -> std::io::Result<()> {
     // Read headers until \r\n\rn, then exactly Content-Length bytes.

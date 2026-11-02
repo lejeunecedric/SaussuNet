@@ -10,7 +10,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use saussunet_core::config::{FileConfig, RuntimeConfig};
-use saussunet_core::llm::{LlmProvider, MockProvider, Scripted};
+use saussunet_core::llm::{MockProvider, Scripted};
 use saussunet_core::pipeline::{self, JOB_KIND_INGEST_RAW};
 use saussunet_core::queue::{spawn_workers, WorkerConfig};
 use saussunet_core::vault::Vault;
