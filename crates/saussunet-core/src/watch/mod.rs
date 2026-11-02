@@ -295,3 +295,51 @@ async fn poll_inner(
 fn sanitize_line(s: &str) -> String {
     s.replace(['\r', '\n'], " ")
 }
+
+/// Spawn the interval poll loop for one configured source (D-10): polls
+/// immediately on startup (`interval`'s first tick fires instantly) and
+/// forever after; a failing poll is WARN-only (D-11 — `poll_once` errors are
+/// pre-sanitized: no creds, no bodies) and the next attempt simply rides the
+/// next tick (the interval IS the retry loop; no in-poller backoff).
+///
+/// First-poll jitter (RESEARCH open Q5): deterministic stagger —
+/// `hash(source_id) % 5000 ms`, capped at `interval / 10` so short-interval
+/// tests stay fast. No rand dep, no thundering-herd machinery — personal-LAN
+/// scale.
+///
+/// Silent-watcher posture (threat model): a panic inside this task would stop
+/// one source invisibly; the caller keeps the `JoinHandle` and aborts it on
+/// shutdown — same posture as the Phase 2 worker pool. Phase 5 UI surfaces
+/// last-poll status from `sync_state`.
+pub fn spawn_watcher(
+    store: Arc<Store>,
+    vault: Arc<Vault>,
+    src: ResolvedWatch,
+    max_fetch_bytes: u64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let jitter = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            src.source_id.hash(&mut h);
+            let ms = h.finish() % 5000;
+            std::time::Duration::from_millis(ms.min((src.interval / 10).as_millis() as u64))
+        };
+        tokio::time::sleep(jitter).await;
+        tracing::debug!(source = %src.source_id, interval = ?src.interval, "watch poller started");
+        let mut tick = tokio::time::interval(src.interval); // first tick fires immediately (D-10)
+        loop {
+            tick.tick().await;
+            match poll_once(&store, &vault, &src, max_fetch_bytes).await {
+                // DEBUG only on success — no per-file logging from the loop.
+                Ok(n) => tracing::debug!(source = %src.source_id, enqueued = n, "watch poll ok"),
+                // D-11: WARN only — poll_once errors are pre-sanitized
+                // (no creds, no response bodies); next attempt rides the
+                // next tick.
+                Err(e) => {
+                    tracing::warn!(source = %src.source_id, "watch poll failed: {e}");
+                }
+            }
+        }
+    })
+}

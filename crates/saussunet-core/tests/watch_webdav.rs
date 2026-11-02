@@ -1061,3 +1061,44 @@ async fn poll_failure_records_last_error() {
         "last_error cleared after recovery"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 04-06 — daemon lifecycle: interval loop (T5) + restart-resume proof (T6)
+// ---------------------------------------------------------------------------
+
+/// T5 (D-10): `spawn_watcher` polls immediately on spawn and repeats on the
+/// per-source interval. 10 ms interval ⇒ ≥2 stub requests within ~150 ms,
+/// yet exactly ONE ingest job total (watch_state dedups across ticks), and
+/// aborting the handle stops all further requests.
+#[tokio::test]
+async fn interval_loop_polls_on_spawn_and_repeats() {
+    use saussunet_core::watch::spawn_watcher;
+
+    let (base, stub) = stub_webdav();
+    stub.insert("note.md", b"hello", "\"n1\"");
+    let (_tmp, vault_id, store, vault, mut src) = setup_watch(&base).await;
+    src.interval = std::time::Duration::from_millis(10);
+
+    let handle = spawn_watcher(store.clone(), vault.clone(), src.clone(), 1 << 20);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    assert!(
+        stub.requests().len() >= 2,
+        "interval loop must poll repeatedly: {:?}",
+        stub.requests()
+    );
+    assert_eq!(
+        store.list_jobs(vault_id, None).await.unwrap().len(),
+        1,
+        "dedup via watch_state across ticks — one job total"
+    );
+
+    handle.abort();
+    let after_abort = stub.requests().len();
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    assert_eq!(
+        stub.requests().len(),
+        after_abort,
+        "aborted watcher must make no further requests"
+    );
+}
