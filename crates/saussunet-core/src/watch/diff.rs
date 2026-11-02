@@ -1,7 +1,133 @@
-//! Pure walk-vs-state differ (no DB, no HTTP — grep-proof: no reqwest, no
-//! sqlx, no fs). `diff_walk` answers "what changed" given a COMPLETED walk
-//! and the persisted `watch_state` rows; the poller (04-04) maps
-//! `DavEntry`/`WatchRow` into these plain structs.
+//! Pure walk-vs-state differ — zero I/O imports (see the acceptance grep
+//! proving no HTTP/DB/filesystem tokens appear in this file). `diff_walk`
+//! answers "what changed" given a COMPLETED walk and the persisted
+//! `watch_state` rows; the poller (04-04) maps `DavEntry`/`WatchRow` into
+//! these plain structs.
+//!
+//! `diff_walk` deliberately does NOT know about sha256 gating (poller-level,
+//! after download): `Changed` means "worth a GET", not "worth a job" — that
+//! is what keeps weak-etag servers cheap (D-07).
+
+use std::collections::{HashMap, HashSet};
+
+use super::multistatus::DavEntry;
+
+/// One file/collection seen in a (completed) walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkEntry {
+    pub path: String,
+    pub etag: Option<String>,
+    pub size: Option<i64>,
+    pub is_dir: bool,
+}
+
+/// One persisted `watch_state` row (poller maps `WatchRow` → this; diff.rs
+/// stays free of store imports).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateEntry {
+    pub path: String,
+    pub etag: Option<String>,
+    pub size: Option<i64>,
+    pub is_dir: bool,
+    /// Carried for the caller's convenience (sha256 gate lives in the
+    /// poller, never here).
+    pub sha256: Option<String>,
+}
+
+/// A classification outcome. `Skipped` = Added/Changed whose extension is
+/// outside the allowlist (D-08; poller logs once, 04-05).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchDelta {
+    Added(WalkEntry),
+    Changed(WalkEntry),
+    Removed(StateEntry),
+    Skipped(WalkEntry),
+}
+
+impl From<&DavEntry> for WalkEntry {
+    fn from(e: &DavEntry) -> Self {
+        WalkEntry {
+            path: e.path.clone(),
+            etag: e.etag.clone(),
+            size: e.size,
+            is_dir: e.is_collection,
+        }
+    }
+}
+
+/// Classify a COMPLETED walk against persisted state (caller guarantees
+/// completeness — removals must never run on a partial walk, Pitfall 3).
+///
+/// * no state row → `Added` (or `Skipped` if the extension is outside the
+///   allowlist);
+/// * etag differs (any difference, incl. weak rotation) → `Changed`; both
+///   etags absent → size difference decides;
+/// * in state, absent from walk → `Removed`;
+/// * `is_dir` walk entries → no delta (dirs are state bookkeeping only).
+///
+/// Deterministic order: walk-pass deltas (Added/Changed/Skipped interleaved)
+/// in walk order, then Removed in state order.
+pub fn diff_walk(
+    walk: &[WalkEntry],
+    state: &[StateEntry],
+    allowlist: &[String],
+) -> Vec<WatchDelta> {
+    let state_map: HashMap<&str, &StateEntry> =
+        state.iter().map(|s| (s.path.as_str(), s)).collect();
+    let walked: HashSet<&str> = walk.iter().map(|w| w.path.as_str()).collect();
+
+    let mut deltas = Vec::new();
+    for w in walk {
+        if w.is_dir {
+            continue; // collections are bookkeeping, never enqueued
+        }
+        match state_map.get(w.path.as_str()) {
+            None => {
+                deltas.push(if ext_matches(&w.path, allowlist) {
+                    WatchDelta::Added(w.clone())
+                } else {
+                    WatchDelta::Skipped(w.clone())
+                });
+            }
+            Some(st) => {
+                // Any etag difference is Changed (weak rotation included —
+                // the sha256 gate downstream decides, D-07). With no etag on
+                // either side, size is the only signal.
+                let changed = if st.etag != w.etag {
+                    true
+                } else {
+                    st.etag.is_none() && st.size != w.size
+                };
+                if changed {
+                    deltas.push(if ext_matches(&w.path, allowlist) {
+                        WatchDelta::Changed(w.clone())
+                    } else {
+                        WatchDelta::Skipped(w.clone())
+                    });
+                }
+            }
+        }
+    }
+    for s in state {
+        if !walked.contains(s.path.as_str()) {
+            deltas.push(WatchDelta::Removed(s.clone()));
+        }
+    }
+    deltas
+}
+
+/// File-name extension vs the allowlist (lowercase, dot-stripped — the
+/// 04-01 normalization). No dot in the file name → no match.
+fn ext_matches(path: &str, allowlist: &[String]) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    match file.rsplit_once('.') {
+        Some((_, ext)) => {
+            let ext = ext.to_lowercase();
+            allowlist.contains(&ext)
+        }
+        None => false,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -33,7 +159,11 @@ mod tests {
 
     #[test]
     fn added_when_path_absent_from_state() {
-        let deltas = diff_walk(&[walk("note.md", Some("\"a\""), Some(1), false)], &[], &allow());
+        let deltas = diff_walk(
+            &[walk("note.md", Some("\"a\""), Some(1), false)],
+            &[],
+            &allow(),
+        );
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
             WatchDelta::Added(w) => assert_eq!(w.path, "note.md"),
@@ -83,7 +213,11 @@ mod tests {
     #[test]
     fn skipped_for_extension_outside_allowlist() {
         // D-08: new notes.docx is Skipped, not Added (poller logs once, 04-05).
-        let deltas = diff_walk(&[walk("notes.docx", Some("\"d\""), Some(9), false)], &[], &allow());
+        let deltas = diff_walk(
+            &[walk("notes.docx", Some("\"d\""), Some(9), false)],
+            &[],
+            &allow(),
+        );
         assert_eq!(deltas.len(), 1);
         match &deltas[0] {
             WatchDelta::Skipped(w) => assert_eq!(w.path, "notes.docx"),
