@@ -196,28 +196,35 @@ fn propfind_response(
         format!("{key}/")
     };
     let guard = tree.lock().unwrap();
-    if !key.is_empty() && !guard.contains_key(&key) {
+    // 04-05: a collection is walkable if it has an explicit dir key OR any
+    // deeper key under it (`a/b/c.md` makes `a/` and `a/b/` walkable without
+    // explicit dir keys — implicit collections are synthesized below).
+    if !key.is_empty() && !guard.keys().any(|k| k.starts_with(&key)) {
         return (404, vec![], b"Not Found".to_vec());
     }
-    // One-level children of `key`, sorted for determinism.
-    let mut children: Vec<String> = guard
-        .keys()
-        .filter(|k| {
-            if key.is_empty() {
-                let rest = k.as_str();
-                (!rest.ends_with('/') && !rest.contains('/'))
-                    || (rest.ends_with('/') && !rest[..rest.len() - 1].contains('/'))
-            } else if let Some(rest) = k.strip_prefix(&key) {
-                !rest.is_empty()
-                    && ((!rest.ends_with('/') && !rest.contains('/'))
-                        || (rest.ends_with('/') && !rest[..rest.len() - 1].contains('/')))
-            } else {
-                false
+    // One-level children of `key`: explicit file/dir keys PLUS implicit
+    // collections synthesized from deeper keys, sorted for determinism.
+    let mut children: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for k in guard.keys() {
+        let Some(rest) = k.strip_prefix(&key) else {
+            continue;
+        };
+        if rest.is_empty() {
+            continue;
+        }
+        match rest.find('/') {
+            // A deeper segment ⇒ the first segment names a (possibly
+            // implicit) collection at this level.
+            Some(idx) => {
+                children.insert(format!("{key}{}/", &rest[..idx]));
             }
-        })
-        .cloned()
-        .collect();
-    children.sort();
+            // A file or explicit dir key sitting directly at this level.
+            None => {
+                children.insert(k.clone());
+            }
+        }
+    }
+    let children: Vec<String> = children.into_iter().collect();
 
     let self_href = if raw_path.is_empty() { "/" } else { raw_path };
     let mut xml = String::from(
@@ -235,12 +242,12 @@ fn propfind_response(
         };
         let name_enc = encode_segment(name_body);
         let href = format!("{}/{name_enc}{dir_slash}", self_href.trim_end_matches('/'));
-        let entry = guard.get(&child).expect("key just listed");
         if child.ends_with('/') {
             xml.push_str(&format!(
                 "  <d:response><d:href>{href}</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\n"
             ));
         } else {
+            let entry = guard.get(&child).expect("key just listed");
             xml.push_str(&format!(
                 "  <d:response><d:href>{href}</d:href><d:propstat><d:prop><d:resourcetype/><d:getetag>{}</d:getetag><d:getcontentlength>{}</d:getcontentlength></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\n",
                 entry.etag,
@@ -454,16 +461,58 @@ use tempfile::TempDir;
 
 /// Boot a real vault + store (04-01 config path end-to-end) pointed at the stub.
 async fn setup_watch(stub_base: &str) -> (TempDir, i64, Arc<Store>, Arc<Vault>, ResolvedWatch) {
+    setup_watch_with(stub_base, None, None, None).await
+}
+
+/// 04-05 variant: same boot, with optional `depth_cap` / basic-auth overrides.
+async fn setup_watch_with(
+    stub_base: &str,
+    depth_cap: Option<u32>,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> (TempDir, i64, Arc<Store>, Arc<Vault>, ResolvedWatch) {
     let tmp = TempDir::new().expect("tempdir");
-    let toml = format!(
+    let mut toml = format!(
         "[storage]\ndata_dir = \"{}\"\n\n[vault]\nid = 1\nname = \"main\"\n\n[[watch]]\nurl = \"{stub_base}\"\ninterval_secs = 300\n",
         tmp.path().display()
     );
+    if let Some(d) = depth_cap {
+        toml.push_str(&format!("depth_cap = {d}\n"));
+    }
+    if let Some(u) = username {
+        toml.push_str(&format!("username = \"{u}\"\n"));
+    }
+    if let Some(p) = password {
+        toml.push_str(&format!("password = \"{p}\"\n"));
+    }
     let cfg: FileConfig = toml::from_str(&toml).expect("config parses");
     let rt = cfg.resolve().expect("resolve");
     let (store, vault) = boot_open(&rt).await.expect("boot");
     let src = rt.watch.first().expect("one watch").clone();
     (tmp, vault.id, Arc::new(store), Arc::new(vault), src)
+}
+
+/// Byte-snapshot of every file under `root` (sorted) — used to prove removals
+/// never touch vault pages (D-09).
+fn snapshot_dir(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                let rel = p.strip_prefix(root).unwrap().display().to_string();
+                out.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// T1: one poll over a stub tree leaves pending `ingest_raw` jobs whose
@@ -569,5 +618,181 @@ async fn extension_allowlist_routing() {
         !jobs.iter().any(|j| j.payload_json.contains("docx")),
         "d.docx must produce no job: {:?}",
         jobs.iter().map(|j| &j.payload_json).collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 1 (04-05) — full BFS walk under the depth cap, removals, skip notes
+// (T3, T4, T11b + log-injection defense).
+// ---------------------------------------------------------------------------
+
+/// T4 (SRCC-01): BFS walk sends Depth: 1 on EVERY PROPFIND and never
+/// descends past `depth_cap`. A shallow source misses the deep file; a
+/// second source with the default cap finds it.
+#[tokio::test]
+async fn walk_depth_cap() {
+    let (base, stub) = stub_webdav();
+    stub.insert("top.md", b"top", "\"t\"");
+    // Implicit dirs: d1 (depth 1), d1/d2 (2), d1/d2/d3 (3); deep.md at depth 4.
+    stub.insert("d1/d2/d3/deep.md", b"deep", "\"d\"");
+
+    // Source A: depth_cap = 2 ⇒ PROPFINDs at depths 0..2 only.
+    let (_tmp, vault_id, store, vault, src) = setup_watch_with(&base, Some(2), None, None).await;
+    assert_eq!(src.depth_cap, 2);
+    let enqueued = poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect("poll cap=2");
+    assert_eq!(enqueued, 1, "only top.md is visible at depth_cap=2");
+
+    let reqs = stub.requests();
+    let propfinds: Vec<&(String, String, Option<String>, String)> =
+        reqs.iter().filter(|(m, ..)| m == "PROPFIND").collect();
+    assert!(
+        propfinds.len() >= 3,
+        "root + d1 + d1/d2 walked: {propfinds:?}"
+    );
+    for (_, _, depth, _) in &propfinds {
+        assert_eq!(
+            depth.as_deref(),
+            Some("1"),
+            "SRCC-01: every PROPFIND must carry Depth: 1 (never infinity)"
+        );
+    }
+    for (_, path, _, _) in &propfinds {
+        let levels = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).count();
+        assert!(
+            levels <= 2,
+            "no PROPFIND may target a path deeper than the cap: {path}"
+        );
+        assert!(
+            !path.contains("d3"),
+            "walk must stop before d3 at depth_cap=2: {path}"
+        );
+    }
+    let jobs = store.list_jobs(vault_id, None).await.unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert!(
+        !jobs.iter().any(|j| j.payload_json.contains("deep")),
+        "deep.md must NOT be enqueued at depth_cap=2"
+    );
+
+    // Source B: depth_cap = 4 (fresh vault, same stub) ⇒ deep.md is found.
+    let (_tmp2, vid2, store2, vault2, src2) = setup_watch_with(&base, Some(4), None, None).await;
+    let enq2 = poll_once(&store2, &vault2, &src2, 1 << 20)
+        .await
+        .expect("poll cap=4");
+    assert_eq!(enq2, 2, "top.md + deep.md at depth_cap=4");
+    let rows = store2.list_watch_rows(vid2, &src2.source_id).await.unwrap();
+    assert!(rows.iter().any(|r| r.path == "d1/d2/d3/deep.md"));
+    assert!(rows.iter().any(|r| r.path == "d1" && r.is_dir));
+}
+
+/// T3 (D-09): a file deleted server-side yields a log.md removal entry and a
+/// deleted watch_state row — and NEVER touches vault pages.
+#[tokio::test]
+async fn removed_file_logs_and_prunes_state() {
+    let (base, stub) = stub_webdav();
+    stub.insert("keep.md", b"keep", "\"k\"");
+    stub.insert("gone.md", b"gone", "\"g\"");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("first poll"),
+        2
+    );
+
+    // A vault page that removals must never touch (D-09).
+    let pages = vault.root.join("pages");
+    std::fs::create_dir_all(&pages).expect("pages dir");
+    std::fs::write(pages.join("test-page.md"), b"# Page\nuntouchable\n").unwrap();
+    let pages_before = snapshot_dir(&pages);
+    let jobs_before = store.list_jobs(vault_id, None).await.unwrap().len();
+
+    stub.remove("gone.md");
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("poll after removal"),
+        0,
+        "a removal never enqueues a job"
+    );
+
+    let log = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
+    assert!(
+        log.contains("removed: gone.md"),
+        "removal logged: {log}"
+    );
+    assert!(!log.contains("removed: keep.md"), "keep.md must survive");
+
+    let rows = store.list_watch_rows(vault_id, &src.source_id).await.unwrap();
+    assert!(!rows.iter().any(|r| r.path == "gone.md"), "state row pruned");
+    assert!(rows.iter().any(|r| r.path == "keep.md"), "keep.md row intact");
+
+    assert_eq!(snapshot_dir(&pages), pages_before, "vault pages untouched");
+    assert_eq!(store.list_jobs(vault_id, None).await.unwrap().len(), jobs_before);
+}
+
+/// T11b (D-08): a non-allowlisted extension is logged ONCE across polls —
+/// the marker state row is the "already noted" memory — and gets no job.
+#[tokio::test]
+async fn skipped_ext_logged_once_not_every_poll() {
+    let (base, stub) = stub_webdav();
+    stub.insert("a.md", b"md", "\"1\"");
+    stub.insert("d.docx", b"docx bytes", "\"4\"");
+    let (_tmp, vault_id, store, vault, src) = setup_watch(&base).await;
+
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("first poll"),
+        1,
+        "docx gets no job"
+    );
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("second poll"),
+        0
+    );
+
+    let log = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
+    let skip_lines = log.lines().filter(|l| l.contains("skipped")).count();
+    assert_eq!(skip_lines, 1, "skip note logged exactly once: {log}");
+    assert!(log.contains("skipped (extension not allowlisted): d.docx"));
+    assert_eq!(store.list_jobs(vault_id, None).await.unwrap().len(), 1);
+
+    // The marker row exists with sha256 NULL (it is the already-noted marker).
+    let rows = store.list_watch_rows(vault_id, &src.source_id).await.unwrap();
+    let docx = rows.iter().find(|r| r.path == "d.docx").expect("marker row");
+    assert!(docx.sha256.is_none(), "skip marker carries no sha256");
+}
+
+/// Threat model (log injection): a crafted filename carrying a newline must
+/// not forge an extra log.md entry header.
+#[tokio::test]
+async fn log_injection_via_filename_is_neutralized() {
+    let (base, stub) = stub_webdav();
+    stub.insert("evil\nINJECTED.md", b"x", "\"e\"");
+    let (_tmp, _vault_id, store, vault, src) = setup_watch(&base).await;
+    let before = std::fs::read_to_string(vault.root.join("log.md")).unwrap_or_default();
+    let base_count = saussunet_core::vault::log::entry_count(&before);
+
+    assert_eq!(
+        poll_once(&store, &vault, &src, 1 << 20)
+            .await
+            .expect("poll_once"),
+        1
+    );
+
+    let log = std::fs::read_to_string(vault.root.join("log.md")).expect("log.md");
+    assert!(
+        !log.contains("\nINJECTED"),
+        "newline from an untrusted filename forged a log line: {log}"
+    );
+    assert_eq!(
+        saussunet_core::vault::log::entry_count(&log),
+        base_count + 1,
+        "exactly one Watch entry, no forged header"
     );
 }
