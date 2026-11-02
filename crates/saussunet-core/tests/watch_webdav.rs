@@ -1713,3 +1713,85 @@ async fn http_400_first_poll_latches_sync_unsupported() {
         .expect("sync row");
     assert!(sync.sync_unsupported, "HTTP-level 400 must latch (M2)");
 }
+
+// ---------------------------------------------------------------------------
+// 04 review fix M1 — crafted dot-segment hrefs must never steer requests
+// above the watched root (url_for is the single choke point).
+// ---------------------------------------------------------------------------
+
+/// M1 unit-level: url_for (via get_bytes) rejects any rel containing '.' or
+/// '..' segments — before any request leaves the client.
+#[tokio::test]
+async fn url_for_rejects_dot_segments() {
+    let (base, stub) = stub_webdav();
+    let src = watch_for(&base, None, None);
+    let client = DavClient::new(&src).expect("client builds");
+    for rel in [
+        "../etc/passwd",
+        "..",
+        "a/../../b.md",
+        "./x.md",
+        "a/./b.md",
+    ] {
+        let err = client
+            .get_bytes(rel, 1024)
+            .await
+            .expect_err("dot-segment rel must be rejected");
+        assert!(
+            err.to_string().contains("dot-segment"),
+            "sanitized Dav rejection expected for {rel:?}: {err}"
+        );
+    }
+    assert!(
+        stub.requests().is_empty(),
+        "rejection must happen before any request: {:?}",
+        stub.requests()
+    );
+}
+
+/// M1 integration: a hostile sync-capable server lists '../../secret.md'.
+/// Url::join would resolve it to /secret.md — above the /vault-inbox/ watch
+/// root. The poll must record an error and NOT send any request outside
+/// the root (asserted via the stub's request log).
+#[tokio::test]
+async fn dot_segment_href_cannot_escape_watch_root() {
+    let (base, stub) = stub_webdav();
+    stub.set_sync_mode(SyncMode::Enabled {
+        script: vec![SyncReply {
+            items: vec![("../../secret.md".to_string(), ItemStatus::Ok)],
+            token: "http://stub/sync/1".to_string(),
+        }],
+    });
+    let root = format!("{base}vault-inbox/");
+    let (_tmp, vault_id, store, vault, src) = setup_watch_with(&root, None, None, None).await;
+
+    poll_once(&store, &vault, &src, 1 << 20)
+        .await
+        .expect_err("hostile dot-segment href must fail the poll");
+
+    let reqs = stub.requests();
+    assert!(
+        reqs.iter().any(|(m, ..)| m == "POST"),
+        "the sync attempt itself was made: {reqs:?}"
+    );
+    for (_, path, ..) in &reqs {
+        assert!(
+            path.starts_with("/vault-inbox/"),
+            "request escaped the watch root: {reqs:?}"
+        );
+    }
+    assert!(
+        !reqs.iter().any(|(_, p, ..)| p == "/secret.md"),
+        "dot-segment resolution reached /secret.md: {reqs:?}"
+    );
+
+    let sync = store
+        .get_sync_state(vault_id, &src.source_id)
+        .await
+        .unwrap()
+        .expect("sync row");
+    assert!(
+        sync.last_error.is_some(),
+        "the rejection must be recorded as last_error"
+    );
+}

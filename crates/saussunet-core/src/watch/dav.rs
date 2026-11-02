@@ -220,9 +220,24 @@ impl DavClient {
 
     /// Join `rel` (DECODED, root-relative) onto the base, percent-encoding
     /// each segment first (manual encoder: keep `[A-Za-z0-9._~-]`).
+    ///
+    /// M1 (04 review) choke point: every request URL is built here, so this
+    /// is where crafted dot-segment hrefs are refused. `encode_segment`
+    /// keeps `.` verbatim, and RFC 3986 dot-segment removal in `Url::join`
+    /// would resolve `../../x` ABOVE the watch root — a hostile server must
+    /// never steer GET/PROPFIND outside the folder the operator scoped.
+    /// `rel` arrives percent-DECODED from the parser, so a plain segment
+    /// check catches both literal and `%2e%2e`-encoded traversal.
     fn url_for(&self, rel: &str) -> Result<Url> {
         if rel.is_empty() {
             return Ok(self.base.clone());
+        }
+        if rel.split('/').any(|seg| seg == "." || seg == "..") {
+            // Sanitized surface (D-02): describe the rejection, quote the
+            // rel lossily-free via {:?} which escapes control characters.
+            return Err(CoreError::Dav(format!(
+                "rejected watch path {rel:?}: dot-segments are not allowed"
+            )));
         }
         let encoded = rel
             .split('/')
