@@ -224,7 +224,10 @@ mod tests {
         assert_eq!(ss.etag.as_deref(), Some("etag-1"));
         assert_eq!(ss.last_poll_at.as_deref(), Some("2026-01-02T00:00:00Z"));
         assert_eq!(ss.last_error, None);
-        assert_eq!(store.get_source_sha256(1, "s1").await.unwrap().as_deref(), Some("aa11"));
+        assert_eq!(
+            store.get_source_sha256(1, "s1").await.unwrap().as_deref(),
+            Some("aa11")
+        );
 
         // Error path: last_error recorded, everything else still intact.
         store
@@ -240,7 +243,11 @@ mod tests {
             .record_sync_poll(1, "s-new", Some("t"), Some("e"))
             .await
             .unwrap();
-        let ss = store.get_sync_state(1, "s-new").await.unwrap().expect("row");
+        let ss = store
+            .get_sync_state(1, "s-new")
+            .await
+            .unwrap()
+            .expect("row");
         assert_eq!(ss.last_error.as_deref(), Some("e"));
     }
 
@@ -277,7 +284,11 @@ mod tests {
 
         // Upsert-safe: creates the row when absent.
         store.set_sync_token(1, "s-new", Some("t9")).await.unwrap();
-        let ss = store.get_sync_state(1, "s-new").await.unwrap().expect("row");
+        let ss = store
+            .get_sync_state(1, "s-new")
+            .await
+            .unwrap()
+            .expect("row");
         assert_eq!(ss.token.as_deref(), Some("t9"));
     }
 }

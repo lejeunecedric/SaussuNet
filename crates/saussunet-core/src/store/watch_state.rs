@@ -62,11 +62,7 @@ impl Store {
     }
 
     /// The full per-source snapshot the poller diffs against before a walk.
-    pub async fn list_watch_rows(
-        &self,
-        vault_id: i64,
-        source_id: &str,
-    ) -> Result<Vec<WatchRow>> {
+    pub async fn list_watch_rows(&self, vault_id: i64, source_id: &str) -> Result<Vec<WatchRow>> {
         let rows = sqlx::query_as::<_, WatchRow>(
             "SELECT vault_id, source_id, path, is_dir, etag, size, sha256, last_seen_at \
              FROM watch_state WHERE vault_id = ? AND source_id = ? ORDER BY path",
@@ -144,7 +140,16 @@ mod tests {
         assert!(store.list_watch_rows(1, "s1").await.unwrap().is_empty());
 
         store
-            .upsert_watch_row(1, "s1", "notes/a.md", false, Some("\"e1\""), Some(10), Some("aa11"), "2026-01-01T00:00:00Z")
+            .upsert_watch_row(
+                1,
+                "s1",
+                "notes/a.md",
+                false,
+                Some("\"e1\""),
+                Some(10),
+                Some("aa11"),
+                "2026-01-01T00:00:00Z",
+            )
             .await
             .unwrap();
         let rows = store.list_watch_rows(1, "s1").await.unwrap();
@@ -161,7 +166,16 @@ mod tests {
 
         // Re-upsert same key: overwrites, does not duplicate.
         store
-            .upsert_watch_row(1, "s1", "notes/a.md", false, Some("\"e2\""), Some(20), Some("bb22"), "2026-01-02T00:00:00Z")
+            .upsert_watch_row(
+                1,
+                "s1",
+                "notes/a.md",
+                false,
+                Some("\"e2\""),
+                Some(20),
+                Some("bb22"),
+                "2026-01-02T00:00:00Z",
+            )
             .await
             .unwrap();
         let rows = store.list_watch_rows(1, "s1").await.unwrap();
