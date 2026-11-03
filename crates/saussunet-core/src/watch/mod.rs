@@ -648,6 +648,9 @@ pub fn spawn_watcher(
         tokio::time::sleep(jitter).await;
         tracing::debug!(source = %src.source_id, interval = ?src.interval, "watch poller started");
         let mut tick = tokio::time::interval(src.interval); // first tick fires immediately (D-10)
+                                                            // A slow poll must not cause a burst of catch-up ticks (review L3):
+                                                            // missed ticks are skipped, next attempt rides the regular schedule.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
             match poll_once(&store, &vault, &src, max_fetch_bytes).await {
