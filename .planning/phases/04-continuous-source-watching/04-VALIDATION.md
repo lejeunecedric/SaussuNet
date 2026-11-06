@@ -41,20 +41,20 @@ To be filled from plan `<acceptance_criteria>` when plans land (planner maps T1�
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 04-01/1 | 04-01 | 1 | SRCC-01 | creds-in-URL rejection | SecretString password; userinfo URLs rejected | unit (tdd) | `cargo test -p saussunet-core config` | ❌ W0 | ⬜ pending |
-| 04-01/2 | 04-01 | 1 | SRCC-01 | TM 04-01 | T12 debug secrecy + T13 validation + example byte-identity | unit (tdd) | `cargo test -p saussunet-core config` | ❌ W0 | ⬜ pending |
-| 04-02/1 | 04-02 | 1 | SRCC-02 | — (schema only) | parameter-bound sqlx; no creds in schema | integration | `cargo test -p saussunet-core store` | ❌ W0 | ⬜ pending |
-| 04-02/2 | 04-02 | 1 | SRCC-02 | — | no all-column clobber (narrow upserts) | unit | `cargo test -p saussunet-core store` | ❌ W0 | ⬜ pending |
-| 04-03/1 | 04-03 | 2 | SRCC-01 | XML bomb (roxmltree no-DTD) | T14 parser edge cases | unit (tdd) | `cargo test -p saussunet-core watch` | ❌ W0 | ⬜ pending |
-| 04-03/2 | 04-03 | 2 | SRCC-01/02 | — (pure) | diff purity (no I/O imports) | unit (tdd) | `cargo test -p saussunet-core watch` | ❌ W0 | ⬜ pending |
-| 04-04/1 | 04-04 | 3 | SRCC-01 | HIGH: creds in errors/URLs; size caps | basic_auth only; 8 MiB cap pre-parse | integration | `cargo test -p saussunet-core --test watch_webdav` | ❌ W0 | ⬜ pending |
-| 04-04/2 | 04-04 | 3 | SRCC-01/02 | HIGH: traversal via hrefs → sanitizer | T1/T11a/T15; crash-safe write order | integration | `cargo test -p saussunet-core --test watch_webdav && cargo test -p saussunet-core --test pipeline_raw` | ❌ W0 | ⬜ pending |
-| 04-05/1 | 04-05 | 4 | SRCC-01 | HIGH: partial-walk removal storm; log injection | T3/T4/T11b | integration | `cargo test -p saussunet-core --test watch_webdav` | ❌ W0 | ⬜ pending |
-| 04-05/2 | 04-05 | 4 | SRCC-02 | HIGH: last_error hygiene | T2/T7/T9/T10 | integration | `cargo test -p saussunet-core --test watch_webdav` | ❌ W0 | ⬜ pending |
-| 04-06/1 | 04-06 | 5 | SRCC-01 | WARN-only failures | T5 interval loop | integration | `cargo test -p saussunet-core --test watch_webdav interval_loop` | ❌ W0 | ⬜ pending |
-| 04-06/2 | 04-06 | 5 | SRCC-02 | — | T6 restart no re-scan (file-backed SQLite) | integration | `cargo test -p saussunet-core --test watch_webdav restart` | ❌ W0 | ⬜ pending |
-| 04-07/1 | 04-07 | 6 | SRCC-02 | HIGH: opaque token cap; shared error helper | sync_collection + stale-retry/latch | unit/build | `cargo build -p saussunet-core` | ❌ W0 | ⬜ pending |
-| 04-07/2 | 04-07 | 6 | SRCC-02 | — | T8 token round-trip + fallback latch + stale-token | integration | `cargo test -p saussunet-core --test watch_webdav` | ❌ W0 | ⬜ pending |
+| 04-01/1 | 04-01 | 1 | SRCC-01 | creds-in-URL rejection | SecretString password; userinfo URLs rejected | unit (tdd) | `cargo test -p saussunet-core config` | ✅ present | ✅ green |
+| 04-01/2 | 04-01 | 1 | SRCC-01 | TM 04-01 | T12 debug secrecy + T13 validation + example byte-identity | unit (tdd) | `cargo test -p saussunet-core config` | ✅ present | ✅ green |
+| 04-02/1 | 04-02 | 1 | SRCC-02 | — (schema only) | parameter-bound sqlx; no creds in schema | integration | `cargo test -p saussunet-core store` | ✅ present | ✅ green |
+| 04-02/2 | 04-02 | 1 | SRCC-02 | — | no all-column clobber (narrow upserts) | unit | `cargo test -p saussunet-core store` | ✅ present | ✅ green |
+| 04-03/1 | 04-03 | 2 | SRCC-01 | XML bomb (roxmltree no-DTD) | T14 parser edge cases | unit (tdd) | `cargo test -p saussunet-core watch` | ✅ present | ✅ green |
+| 04-03/2 | 04-03 | 2 | SRCC-01/02 | — (pure) | diff purity (no I/O imports) | unit (tdd) | `cargo test -p saussunet-core watch` | ✅ present | ✅ green |
+| 04-04/1 | 04-04 | 3 | SRCC-01 | HIGH: creds in errors/URLs; size caps | basic_auth only; 8 MiB cap pre-parse | integration | `cargo test -p saussunet-core --test watch_webdav` | ✅ present | ✅ green |
+| 04-04/2 | 04-04 | 3 | SRCC-01/02 | HIGH: traversal via hrefs → sanitizer | T1/T11a/T15; crash-safe write order | integration | `cargo test -p saussunet-core --test watch_webdav && cargo test -p saussunet-core --test pipeline_raw` | ✅ present | ✅ green |
+| 04-05/1 | 04-05 | 4 | SRCC-01 | HIGH: partial-walk removal storm; log injection | T3/T4/T11b | integration | `cargo test -p saussunet-core --test watch_webdav` | ✅ present | ✅ green |
+| 04-05/2 | 04-05 | 4 | SRCC-02 | HIGH: last_error hygiene | T2/T7/T9/T10 | integration | `cargo test -p saussunet-core --test watch_webdav` | ✅ present | ✅ green |
+| 04-06/1 | 04-06 | 5 | SRCC-01 | WARN-only failures | T5 interval loop | integration | `cargo test -p saussunet-core --test watch_webdav interval_loop` | ✅ present | ✅ green |
+| 04-06/2 | 04-06 | 5 | SRCC-02 | — | T6 restart no re-scan (file-backed SQLite) | integration | `cargo test -p saussunet-core --test watch_webdav restart` | ✅ present | ✅ green |
+| 04-07/1 | 04-07 | 6 | SRCC-02 | HIGH: opaque token cap; shared error helper | sync_collection + stale-retry/latch | unit/build | `cargo build -p saussunet-core` | ✅ present | ✅ green |
+| 04-07/2 | 04-07 | 6 | SRCC-02 | — | T8 token round-trip + fallback latch + stale-token | integration | `cargo test -p saussunet-core --test watch_webdav` | ✅ present | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -87,4 +87,16 @@ To be filled from plan `<acceptance_criteria>` when plans land (planner maps T1�
 - [x] Feedback latency < 120s
 - [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** approved 2026-11-01 (plan-checker VERIFICATION PASSED, 0 blockers)
+**Approval:** approved 2026-11-01 (plan-checker VERIFICATION PASSED, 0 blockers); re-verified 2026-11-03
+
+---
+
+## Validation Audit 2026-11-03
+
+| Metric | Count |
+|--------|-------|
+| Gaps found | 0 |
+| Resolved | 0 (all 14 task rows green at audit time) |
+| Escalated | 1 (pre-existing Manual-Only: real LAN WebDAV server UAT) |
+
+Fresh evidence at HEAD (post review-fixes H1/M1/M2 + MissedTickBehavior): `config::` 28 passed · `store::` 11 passed · `watch::` 16 passed · `watch_webdav` 27 passed · `pipeline_raw` 1 passed — 0 failed. Full suite 266/0/1 + `scripts/check.sh` OK (verifier run, 04-VERIFICATION.md). T1–T16: 16/16 green.
