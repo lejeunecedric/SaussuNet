@@ -80,7 +80,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 ### Phase 04.1: OKF-Native Output (INSERTED)
 
-**Goal:** The vault is an OKF v0.1/v0.2-conformant bundle: the writer emits OKF frontmatter, markdown links and numbered citations natively, and existing llm-wiki vaults migrate with one command.
+**Goal:** The vault is an OKF v0.1/v0.2-conformant bundle: the writer emits OKF frontmatter, markdown links and footnote citations natively, and existing llm-wiki vaults migrate with one command.
 **Mode:** mvp
 **Depends on:** Phase 4
 **Requirements:** OKF-01, OKF-02, OKF-03, OKF-04, OKF-05, OKF-06, OKF-07
