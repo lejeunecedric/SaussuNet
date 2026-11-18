@@ -436,3 +436,37 @@ async fn read_raw_meta(vault: &Vault, rel: &str) -> RawSourceMeta {
         last_modified: other_str("ingested"),
     }
 }
+
+#[cfg(test)]
+mod reserved_tests {
+    use super::check_reserved;
+
+    fn keys(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn root_index_okf_version_only_is_clean() {
+        assert!(check_reserved("index.md", true, &keys(&["okf_version"])).is_empty());
+    }
+
+    #[test]
+    fn root_index_extra_keys_warn_w0() {
+        let v = check_reserved("index.md", true, &keys(&["okf_version", "title"]));
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].starts_with("W0"), "{v:?}");
+    }
+
+    #[test]
+    fn log_with_frontmatter_is_e3() {
+        let v = check_reserved("log.md", true, &keys(&["okf_version"]));
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].starts_with("E3"), "{v:?}");
+    }
+
+    #[test]
+    fn reserved_without_frontmatter_is_clean() {
+        assert!(check_reserved("index.md", false, &[]).is_empty());
+        assert!(check_reserved("log.md", false, &[]).is_empty());
+    }
+}
