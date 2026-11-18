@@ -162,8 +162,8 @@ fn provider_arc(p: &Arc<MockProvider>) -> Arc<dyn LlmProvider> {
 
 /// Read + parse a vault page from disk.
 fn read_page(vault: &Vault, rel: &str) -> (String, frontmatter::PageFrontmatter, String) {
-    let content = std::fs::read_to_string(vault.root.join(rel))
-        .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+    let content =
+        std::fs::read_to_string(vault.root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
     let (yaml, body) = frontmatter::split(&content);
     let fm = frontmatter::parse(yaml).expect("page frontmatter parses");
     let body = body.to_string();
@@ -203,7 +203,10 @@ async fn okf_frontmatter_shape() {
     );
     // D-01/D-08: offset-bearing timestamps.
     let ts = fm.timestamp.expect("timestamp present");
-    assert!(okf::iso_offset_ok(&ts), "timestamp {ts} must carry an offset");
+    assert!(
+        okf::iso_offset_ok(&ts),
+        "timestamp {ts} must carry an offset"
+    );
     let gen = fm.generated.expect("generated present");
     assert_eq!(
         map_str(&gen, "by").as_deref(),
@@ -211,12 +214,19 @@ async fn okf_frontmatter_shape() {
         "D-06 actor"
     );
     let at = map_str(&gen, "at").expect("generated.at");
-    assert!(okf::iso_offset_ok(&at), "generated.at {at} must carry an offset");
+    assert!(
+        okf::iso_offset_ok(&at),
+        "generated.at {at} must carry an offset"
+    );
     // D-08 single-source pairing: first write — created == updated == today,
     // so timestamp and generated.at derive from the same day and cannot drift.
     assert_eq!(ts, at, "no drift between timestamp and generated.at");
     // D-06 key order on disk.
-    let pos = |k: &str| content.find(k).unwrap_or_else(|| panic!("missing {k}: {content}"));
+    let pos = |k: &str| {
+        content
+            .find(k)
+            .unwrap_or_else(|| panic!("missing {k}: {content}"))
+    };
     assert!(pos("type:") < pos("title:"));
     assert!(pos("title:") < pos("description:"));
     assert!(pos("description:") < pos("tags:"));
@@ -229,7 +239,10 @@ async fn okf_frontmatter_shape() {
         map_str(src, "resource").as_deref(),
         Some(format!("/{}", raw_rel()).as_str())
     );
-    assert_eq!(map_str(src, "id").as_deref(), Some(&format!("{}-threshold-post", today())[..]));
+    assert_eq!(
+        map_str(src, "id").as_deref(),
+        Some(&format!("{}-threshold-post", today())[..])
+    );
     // MoriNet cross-check (Pitfall 5): generated + sources ⇒ reads as 0.2.
     let (yaml, _) = frontmatter::split(&content);
     assert_eq!(
@@ -261,17 +274,17 @@ fn sources_entries_shape_unit() {
     );
     meta.insert(
         paths[1].clone(),
-        okf::RawSourceMeta { title: "Foo2".into(), last_modified: None },
+        okf::RawSourceMeta {
+            title: "Foo2".into(),
+            last_modified: None,
+        },
     );
     // paths[2] deliberately has no meta — title falls back to the stem.
     let entries = okf::sources_entries(&paths, &meta);
     assert_eq!(entries.len(), 3);
     let keys = |i: usize| -> Vec<String> {
         match &entries[i] {
-            serde_yml::Value::Mapping(m) => m
-                .iter()
-                .map(|(k, _)| k.to_string())
-                .collect(),
+            serde_yml::Value::Mapping(m) => m.iter().map(|(k, _)| k.to_string()).collect(),
             other => panic!("entry must be a mapping: {other:?}"),
         }
     };
@@ -354,7 +367,7 @@ async fn broken_links_tolerated() {
     // check_page itself never inspects body links:
     assert_eq!(
         okf::check_page(
-            &clean_yaml().replace("tags: [technology]", "tags: [technology]"),
+            &clean_yaml(),
             "text [Ghost](/never-written.md)",
             &okf::DEFAULT_TYPE_VOCAB
         ),
@@ -366,8 +379,10 @@ async fn broken_links_tolerated() {
     let url = "https://okf.example/broken";
     serve(url, V1);
     let mut pj = page_json("Vue", "concept");
-    pj["sections"][0]["markdown"] =
-        json!(format!("Vue is used widely. ^[{}] See [[Meta]] and [[JavaScript]], and [Ghost](/ghost-page.md).", raw_rel()));
+    pj["sections"][0]["markdown"] = json!(format!(
+        "Vue is used widely. ^[{}] See [[Meta]] and [[JavaScript]], and [Ghost](/ghost-page.md).",
+        raw_rel()
+    ));
     let provider = Arc::new(MockProvider::new(vec![
         Scripted::Ok(pass1_central("Vue", "concept")),
         Scripted::Ok(pj),
@@ -404,7 +419,10 @@ async fn raw_is_source() {
     let ts = parsed.timestamp.expect("raw timestamp present");
     assert!(okf::iso_offset_ok(&ts), "raw timestamp {ts}");
     let gen = parsed.generated.expect("raw generated present");
-    assert_eq!(map_str(&gen, "by").as_deref(), Some(okf::actor_string().as_str()));
+    assert_eq!(
+        map_str(&gen, "by").as_deref(),
+        Some(okf::actor_string().as_str())
+    );
     assert!(okf::iso_offset_ok(&map_str(&gen, "at").unwrap()));
     // Extension keys kept verbatim (D-15).
     assert!(content.contains("source_url: https://example.com/post"));

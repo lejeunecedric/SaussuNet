@@ -253,6 +253,7 @@ pub async fn submit_raw(
         &slug,
         ext,
         &vault::raw::RawFrontmatter {
+            title: stem.to_string(),
             source_url: source_hint.to_string(),
             ingested: Utc::now().to_rfc3339(),
             sha256: sha256.clone(),
@@ -336,6 +337,7 @@ async fn ingest_pdf(
         slug,
         "md",
         &vault::raw::RawFrontmatter {
+            title: slug.to_string(),
             source_url: payload.raw_path.clone(),
             ingested: Utc::now().to_rfc3339(),
             sha256: sha256.clone(),
@@ -474,6 +476,7 @@ async fn ingest_url(
         &slug_src,
         "md",
         &vault::raw::RawFrontmatter {
+            title: slug_src.clone(),
             source_url: result.final_url.clone(),
             ingested: Utc::now().to_rfc3339(),
             sha256: result.sha256.clone(),

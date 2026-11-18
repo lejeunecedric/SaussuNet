@@ -15,9 +15,12 @@ use crate::error::{CoreError, Result};
 use super::atomic;
 use super::Vault;
 
-/// Frontmatter block for a raw record (D-07): source_url + ingested + sha256.
+/// Frontmatter block for a raw record (D-07 + D-15): title + source_url +
+/// ingested + sha256 (the OKF `type: Source` framing is added by `write_raw`).
 #[derive(Debug, Clone)]
 pub struct RawFrontmatter {
+    /// Human title of the source (D-15: becomes the Source concept's title).
+    pub title: String,
     pub source_url: String,
     /// RFC3339 timestamp of ingestion.
     pub ingested: String,
@@ -42,9 +45,19 @@ pub async fn write_raw(
     // VLET-02: same single-writer lock as page writes — raw appends and page
     // writes never interleave.
     let _guard = vault.write_lock.lock().await;
+    // D-15: the raw record is an OKF `type: Source` concept — timestamp and
+    // generated.at both come from `ingested` (single source, no drift);
+    // source_url/ingested/sha256 survive as extension keys; body bytes are
+    // appended byte-identical (the frontmatter block is all ours).
     let mut bytes = format!(
-        "---\nsource_url: {}\ningested: {}\nsha256: {}\n---\n\n",
-        frontmatter.source_url, frontmatter.ingested, frontmatter.sha256
+        "---\ntype: Source\ntitle: {}\ntimestamp: {}\ngenerated:\n  by: {}\n  at: {}\nsource_url: {}\ningested: {}\nsha256: {}\n---\n\n",
+        super::frontmatter::scalar(&frontmatter.title),
+        frontmatter.ingested,
+        super::okf::actor_string(),
+        frontmatter.ingested,
+        frontmatter.source_url,
+        frontmatter.ingested,
+        frontmatter.sha256
     )
     .into_bytes();
     bytes.extend_from_slice(body);
@@ -140,6 +153,7 @@ mod tests {
 
     fn fm() -> RawFrontmatter {
         RawFrontmatter {
+            title: "Test Post".to_string(),
             source_url: "https://example.com/post".to_string(),
             ingested: "2026-10-30T12:00:00+00:00".to_string(),
             sha256: "abc123".to_string(),

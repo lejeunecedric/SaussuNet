@@ -12,7 +12,7 @@ use chrono::Utc;
 use crate::error::{CoreError, Result};
 use crate::store::Store;
 
-use super::{atomic, frontmatter, ghash, index, log, schema, validate, Vault};
+use super::{atomic, frontmatter, ghash, index, log, okf, schema, validate, Vault};
 
 /// Outcome of a [`write_page`] call. The three-way merge (D-05..D-08)
 /// decides between them: `Written` (first write or clean overwrite),
@@ -35,14 +35,22 @@ pub(crate) fn sanitize_for_nav(s: &str) -> String {
     s.replace(['\r', '\n'], " ").replace("## [", "##[")
 }
 
-/// Map a page type to its index.md section heading.
-fn index_section(page_type: &str) -> &'static str {
-    match page_type {
-        "entity" => "Entities",
-        "concept" => "Concepts",
-        "comparison" => "Comparisons",
-        "query" => "Queries",
-        other => unreachable!("validate_page rejects types outside PAGE_TYPES: {other}"),
+/// Map a page's directory (first path segment) to its index.md section
+/// heading. Repointed off the frontmatter `type` (PATTERNS §3.2): emitted
+/// types are now capitalized OKF names, the index keeps the four llm-wiki
+/// section names, and the directory is the stable source of both.
+fn index_section(rel_path: &str) -> &'static str {
+    let dir = Path::new(rel_path)
+        .components()
+        .next()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .unwrap_or_default();
+    match dir.as_str() {
+        "entities" => "Entities",
+        "concepts" => "Concepts",
+        "comparisons" => "Comparisons",
+        "queries" => "Queries",
+        other => unreachable!("path guard rejects pages outside PAGE_DIRS: {other}"),
     }
 }
 
@@ -271,7 +279,7 @@ pub async fn write_page(
     // 9. index.md: entry under the type section + header counters.
     index::upsert_entry(
         vault,
-        index_section(&fm.page_type),
+        index_section(rel_path),
         &stem,
         &sanitize_for_nav(&fm.title),
     )
@@ -292,9 +300,11 @@ pub async fn write_page(
 /// PIPE-06 funnel: ALL LLM-generated content enters the vault here.
 ///
 /// Runs the deterministic [`validate::validate_generated_page`] gate BEFORE
-/// any disk write, then delegates to [`write_page`] — validation rejects
-/// before anything touches the filesystem, and `write_page` remains the sole
-/// mutation entry point (this wrapper delegates, never bypasses; VLET-02).
+/// any disk write, rebuilds the frontmatter into conformant OKF shape
+/// (D-06..D-08, D-13/D-14 — read-only, §11-checked via [`okf::check_page`]),
+/// then delegates to [`write_page`] — validation rejects before anything
+/// touches the filesystem, and `write_page` remains the sole mutation entry
+/// point (this wrapper delegates, never bypasses; VLET-02).
 /// Human/CLI paths keep calling plain `write_page`: human-authored pages
 /// are not subject to the provenance rules.
 pub async fn write_generated_page(
@@ -304,5 +314,6 @@ pub async fn write_generated_page(
     content: &str,
 ) -> Result<WriteOutcome> {
     validate::validate_generated_page(vault, store, rel_path, content).await?;
-    write_page(vault, store, rel_path, content).await
+    let content = okf::rebuild_frontmatter(vault, store, rel_path, content).await?;
+    write_page(vault, store, rel_path, &content).await
 }
