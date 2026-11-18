@@ -38,7 +38,7 @@ Requirements for initial release (lean v1). Each maps to roadmap phases.
 
 - [ ] **OKF-01**: The vault writer emits OKF v0.2 frontmatter natively: descriptive `type` derived from the page directory, `title`, one-line `description`, ISO 8601 UTC `timestamp`, `generated: {by: process:saussunet/<version>, at}` — `verified`/`status`/`stale_after` are never emitted without evidence
 - [ ] **OKF-02**: Generated pages use bundle-relative markdown links (`[text](/path.md)`) instead of wikilinks; the write-path validator's link whitelist enforces the same
-- [ ] **OKF-03**: Provenance `^[raw/...]` markers become numbered inline citations plus a trailing `# Citations` section; `sources:` frontmatter becomes `[{resource, id, last_modified}]` entries
+- [ ] **OKF-03**: Provenance `^[raw/...]` markers become markdown footnotes keyed to `sources[].id` (`[^id]` body markers, definitions at the end — amended 2026-11-18 per Phase 04.1 D-12, superseding the v0.1-form numbered citations + `# Citations` section); `sources:` frontmatter becomes `[{resource, id, last_modified}]` entries
 - [ ] **OKF-04**: Index and log follow OKF §6/§7: index files carry no frontmatter (root declares `okf_version: "0.2"`), `log.md` entries group under `## YYYY-MM-DD` headings, newest first
 - [ ] **OKF-05**: Every vault written by SaussuNet passes OKF §9 conformance — every non-reserved .md has parseable frontmatter with a non-empty `type` — checked by the write-path validator; broken cross-links are tolerated
 - [ ] **OKF-06**: `saussunet migrate-okf` converts an existing llm-wiki vault in place to a conformant OKF bundle (Rust port of the B3Wiki converter, validated against B3Wiki fixtures) and refuses an already-converted vault

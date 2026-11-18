@@ -86,7 +86,10 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Requirements:** OKF-01, OKF-02, OKF-03, OKF-04, OKF-05, OKF-06, OKF-07
 **Success Criteria** (what must be TRUE):
   1. Ingesting a URL or PDF produces pages with OKF v0.2 frontmatter — descriptive `type` from the page directory, `title`, `description`, ISO 8601 UTC `timestamp`, `generated: {by: process:saussunet/<version>, at}` — and zero wikilinks in generated output
-  2. Provenance renders as numbered inline citations with a trailing `# Citations` section, and `sources:` frontmatter entries carry `resource`/`id`/`last_modified`
+  2. Provenance renders as markdown footnotes keyed to `sources[].id` (`[^id]` in
+     the body, definitions at the end — D-12, amended 2026-11-18: supersedes the
+     v0.1-form "numbered inline citations + trailing `# Citations` section"), and
+     `sources:` frontmatter entries carry `resource`/`id`/`last_modified`
   3. Root `index.md` declares `okf_version: "0.2"`; `log.md` entries group under `## YYYY-MM-DD` headings, newest first
   4. The write-path validator enforces OKF §9 conformance (every non-reserved .md has parseable frontmatter with a non-empty `type`); broken cross-links are tolerated
   5. `saussunet migrate-okf` converts an llm-wiki vault in place to a conformant bundle (B3Wiki fixture parity) and refuses an already-converted vault
