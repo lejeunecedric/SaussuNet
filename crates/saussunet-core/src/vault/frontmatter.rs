@@ -364,6 +364,89 @@ mod tests {
         assert!(page_out.contains("tags: [technology]\n"));
     }
 
+    fn okf_fm() -> PageFrontmatter {
+        let mut fm = valid_fm();
+        fm.page_type = "Concept".to_string();
+        fm.description = Some("A nested page.".to_string());
+        fm.timestamp = Some("2026-11-18T10:00:00+00:00".to_string());
+        let mut gen = serde_yml::Mapping::new();
+        gen.insert(
+            "by".into(),
+            serde_yml::Value::String("process:saussunet/0.1.0".to_string()),
+        );
+        gen.insert(
+            "at".into(),
+            serde_yml::Value::String("2026-11-18T10:00:00+00:00".to_string()),
+        );
+        fm.generated = Some(serde_yml::Value::Mapping(gen));
+        let mut src = serde_yml::Mapping::new();
+        src.insert("id".into(), serde_yml::Value::String("foo".to_string()));
+        src.insert(
+            "resource".into(),
+            serde_yml::Value::String("/raw/foo.md".to_string()),
+        );
+        src.insert(
+            "title".into(),
+            serde_yml::Value::String("Foo".to_string()),
+        );
+        src.insert(
+            "last_modified".into(),
+            serde_yml::Value::String("2026-11-18T09:00:00+00:00".to_string()),
+        );
+        fm.sources = vec![serde_yml::Value::Mapping(src)];
+        fm
+    }
+
+    #[test]
+    fn serialize_okf_nested() {
+        let mut fm = okf_fm();
+        fm.other
+            .insert("future_field".into(), serde_yml::Value::String("kept".into()));
+        let out = serialize(&fm, "body\n");
+        assert!(
+            out.contains("generated:\n  by: process:saussunet/0.1.0\n"),
+            "nested generated block: {out}"
+        );
+        assert!(
+            out.contains("sources:\n- id: foo\n"),
+            "nested sources list-of-maps: {out}"
+        );
+        // Round-trips through split + parse with unknown-key preservation.
+        let (yaml, _) = split(&out);
+        let fm2 = parse(yaml).unwrap();
+        assert_eq!(fm, fm2, "OKF output must re-parse identically");
+        assert!(fm2.other.contains_key("future_field"));
+    }
+
+    #[test]
+    fn serialize_key_order_d06() {
+        let out = serialize(&okf_fm(), "body\n");
+        let pos = |k: &str| out.find(k).unwrap_or_else(|| panic!("missing {k} in {out}"));
+        assert!(pos("type:") < pos("title:"));
+        assert!(pos("title:") < pos("description:"));
+        assert!(pos("description:") < pos("tags:"));
+        assert!(pos("tags:") < pos("timestamp:"));
+        assert!(pos("timestamp:") < pos("generated:"));
+        assert!(pos("generated:") < pos("sources:"));
+        // Extension keys (created/updated) land after sources.
+        assert!(pos("sources:") < pos("created:"));
+    }
+
+    #[test]
+    fn honesty_no_trust_fields() {
+        for key in ["verified", "status", "stale_after"] {
+            let mut fm = okf_fm();
+            fm.other
+                .insert(key.into(), serde_yml::Value::String("x".into()));
+            let v = honesty_violations(&fm);
+            assert!(
+                v.iter().any(|s| s.contains(key)),
+                "{key} must be rejected by the honesty rule: {v:?}"
+            );
+        }
+        assert!(honesty_violations(&okf_fm()).is_empty());
+    }
+
     #[test]
     fn wikilink_floor_counts_distinct_targets() {
         assert_eq!(count_outbound_wikilinks("see [[a]] and [[b]]"), 2);
