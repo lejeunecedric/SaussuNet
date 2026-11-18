@@ -95,7 +95,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. `saussunet migrate-okf` converts an llm-wiki vault in place to a conformant bundle (B3Wiki fixture parity) and refuses an already-converted vault
 
 **Superseded contracts (planner note):** the Phase 1/3 "≥2 outbound wikilinks" floor and `[[wikilink]]` convention are superseded by OKF-02 bundle-relative markdown links; Phase 5 LINT-01 "broken wikilinks" must be read as "broken markdown links". Reference conversion + mapping decisions: B3Wiki repo branch `okf` (`scripts/to_okf.py`, `OKF-MAPPING.md`).
-**Plans:** 0 plans
+**Plans:** 1/5 plans executed
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 04.1 to break down)
