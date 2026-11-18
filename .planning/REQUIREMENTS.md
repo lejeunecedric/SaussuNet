@@ -34,6 +34,16 @@ Requirements for initial release (lean v1). Each maps to roadmap phases.
 - [x] **SRCC-02**: Watcher state (etags, pageTokens, last-check) persists in SQLite and survives restarts; enqueue is sha256-gated so re-polls of unchanged files are no-ops
 - [x] **SRCC-03**: Ingestion jobs are durable (SQLite queue with atomic claim, retry states, claimed-at expiry) — a crash mid-batch resumes without loss or duplication
 
+### OKF Output (Phase 04.1 insertion)
+
+- [ ] **OKF-01**: The vault writer emits OKF v0.2 frontmatter natively: descriptive `type` derived from the page directory, `title`, one-line `description`, ISO 8601 UTC `timestamp`, `generated: {by: process:saussunet/<version>, at}` — `verified`/`status`/`stale_after` are never emitted without evidence
+- [ ] **OKF-02**: Generated pages use bundle-relative markdown links (`[text](/path.md)`) instead of wikilinks; the write-path validator's link whitelist enforces the same
+- [ ] **OKF-03**: Provenance `^[raw/...]` markers become numbered inline citations plus a trailing `# Citations` section; `sources:` frontmatter becomes `[{resource, id, last_modified}]` entries
+- [ ] **OKF-04**: Index and log follow OKF §6/§7: index files carry no frontmatter (root declares `okf_version: "0.2"`), `log.md` entries group under `## YYYY-MM-DD` headings, newest first
+- [ ] **OKF-05**: Every vault written by SaussuNet passes OKF §9 conformance — every non-reserved .md has parseable frontmatter with a non-empty `type` — checked by the write-path validator; broken cross-links are tolerated
+- [ ] **OKF-06**: `saussunet migrate-okf` converts an existing llm-wiki vault in place to a conformant OKF bundle (Rust port of the B3Wiki converter, validated against B3Wiki fixtures) and refuses an already-converted vault
+- [ ] **OKF-07**: The vault's SCHEMA.md template describes the OKF conventions (types, links, citations, trust fields) so consuming agents read the vault's own contract
+
 ### Health Lint
 
 - [ ] **LINT-01**: The system runs a health lint over the vault (orphan pages, broken wikilinks, index completeness, frontmatter validity, tag taxonomy, raw sha256 drift, contested pages, oversized pages, log rotation) after each batch and on demand
@@ -128,10 +138,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MCPX-01 | Phase 6 | Pending |
 | PREV-01 | Phase 6 | Pending |
 | INFR-03 | Phase 6 | Pending |
+| OKF-01 | Phase 04.1 | Pending |
+| OKF-02 | Phase 04.1 | Pending |
+| OKF-03 | Phase 04.1 | Pending |
+| OKF-04 | Phase 04.1 | Pending |
+| OKF-05 | Phase 04.1 | Pending |
+| OKF-06 | Phase 04.1 | Pending |
+| OKF-07 | Phase 04.1 | Pending |
 
 **Coverage:**
-- v1 requirements: 25 total (corrected count — the v1 section lists 25 REQ-IDs, not 21)
-- Mapped to phases: 25
+- v1 requirements: 32 total (25 original + 7 OKF added for Phase 04.1 insertion)
+- Mapped to phases: 32
 - Unmapped: 0 ✅
 
 ---

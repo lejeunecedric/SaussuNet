@@ -3,14 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: ready_to_plan
-last_updated: 2026-11-02T01:34:03.451Z
+last_updated: "2026-11-18T16:47:01.559Z"
 progress:
-  total_phases: 6
-  completed_phases: 3
+  total_phases: 7
+  completed_phases: 4
   total_plans: 24
   completed_plans: 24
-  percent: 50
-stopped_at: Phase 4 complete (7/7) — ready to discuss Phase 5
+  percent: 57
 ---
 
 # State: SaussuNet
@@ -58,3 +57,9 @@ Single-writer vault layer, atomic writes, `gen_hash` edit protection, and the mu
 
 ---
 *Last updated: 2026-10-25 — roadmap created (6 phases, 25/25 v1 requirements mapped)*
+
+## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 4.1 inserted after Phase 4: OKF v0.2 native output: vault writer emits OKF, migrate-okf command; phases 5/6 build on OKF (URGENT)

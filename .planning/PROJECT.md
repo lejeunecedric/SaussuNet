@@ -8,7 +8,7 @@ Two ways to live: **standalone (webapp)** or **library embeddable in MoriNet** (
 
 ## Core Value
 
-Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-date, interlinked, structured llm-wiki vault (optional ontology) — with no manual note writing.
+Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-date, interlinked, structured **OKF-conformant vault** (llm-wiki lineage, optional ontology) — with no manual note writing.
 
 ## Requirements
 
@@ -25,6 +25,7 @@ Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-d
 
 <!-- Starting hypotheses, validated by shipping. -->
 
+- [ ] OKF v0.2 native output: writer emits conformant OKF (frontmatter, markdown links, citations), `saussunet migrate-okf` for existing vaults — Phase 04.1 (inserted after Phase 4)
 - [ ] File sources: Google Drive (v2) — WebDAV watching shipped in Phase 4
 - [ ] Inbound MCP sources: the vault stores only **pointer notes** (access-point address), content read live via stream on demand
 - [ ] Outbound MCP exposure: the vault served over MCP for external agent reading
@@ -70,6 +71,9 @@ Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-d
 | Continuous source watching (poll + streams) rather than one-shot builds | The vault must "compound" continuously, like the llm-wiki log | — Pending |
 | Full web UI (config, monitoring, review/edit) + MoriNet-style mdbook preview | Human review of generated notes is the quality guardrail of the AI pipeline | — Pending |
 | Rust workspace: `saussunet-core` + standalone binary; MoriNet can depend on the lib | Dual standalone/embedded mode without code duplication or tight coupling | — Pending |
+| OKF v0.2 as the single vault output format — no llm-wiki toggle | Conformance is cheap (frontmatter + type), the provenance model maps 1:1, and a dual format doubles the validator surface; reference conversion B3Wiki branch `okf` (0 lint errors) | — Pending |
+| Trust fields (`verified`/`status`/`stale_after`) never emitted without evidence | Trust fields are claims; fabricating them defeats the layer they exist for (honesty rule, OKF-MAPPING.md) | — Pending |
+| `migrate-okf` command instead of forcing re-ingestion | Existing vaults are assets; the Python converter is proven — port it to Rust with B3Wiki fixtures | — Pending |
 | Spelling corrected: SaussuNet / `saussunet` (not SaussuNoet) | User decision 2026-10-25 | ✓ Locked |
 | Deploy to our server with gitignored server config (example template only in repo) | Hosts/paths/credentials must never be versioned; reuse MoriNet pattern without exposing holldemo | — Pending |
 | Serve at `https://morinet.treklair.fr/saussunet` — nginx path prefix on the same host as MoriNet (holldemo) | User decision 2026-10-25. Phase 5 UI + Phase 6 deploy MUST honor a configurable base path (`/saussunet`): axum `nest()` scope, asset URLs prefixed, nginx `location /saussunet/` proxy beside MoriNet's block; nothing to proxy before Phase 5 (Phase 1 is headless CLI) | — Pending |
@@ -93,4 +97,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-11-02 — Phase 4 (Continuous Source Watching) complete: 266 core tests green, WebDAV polling with depth-capped PROPFIND walk + RFC 6578 sync-token + restart-resume; manual LAN-server UAT pending*
+*Last updated: 2026-11-18 — Phase 04.1 (OKF-Native Output) inserted: vault becomes an OKF v0.2-conformant bundle; OKF-01..07 requirements added; reference conversion B3Wiki branch `okf`*

@@ -16,6 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: LLM Provider + Durable Job Queue** - Abstract LlmProvider (mock + OpenAI-compatible), bounded worker pool, crash-safe SQLite job queue (completed 2026-10-26)
 - [x] **Phase 3: Extraction Pipeline** - Submit a web URL or PDF and get validated, deduplicated, provenance-carrying llm-wiki pages (completed 2026-10-30)
 - [x] **Phase 4: Continuous Source Watching** - WebDAV watched sources polled on an interval; the vault updates itself and survives restarts (completed 2026-11-02)
+- [ ] **Phase 04.1: OKF-Native Output** - The vault is an OKF v0.2-conformant bundle: writer emits OKF natively, `migrate-okf` converts existing vaults (INSERTED)
 - [ ] **Phase 5: Health Lint + Review & Monitoring UI** - Lint reports, review queue with diffs, pipeline monitoring, all config from the web UI
 - [ ] **Phase 6: Exposure + Deployment** - Read-only MCP endpoint, mdbook preview from the UI, deploy to our server with gitignored config
 
@@ -76,6 +77,25 @@ Decimal phases appear between their surrounding integers in numeric order.
   - [x] 04-05: full walk — depth cap, removals, sha256 gate, failure bookkeeping (execute, wave 4) → SRCC-01/02, T2/T3/T4/T7/T9/T10/T11b
   - [x] 04-06: daemon lifecycle — interval loop + restart-resume proof (execute, wave 5) → SRCC-01/02, T5/T6
   - [x] 04-07: opportunistic RFC 6578 sync-collection — pageTokens (execute, wave 6) → SRCC-02, T8
+
+### Phase 04.1: OKF-Native Output (INSERTED)
+
+**Goal:** The vault is an OKF v0.1/v0.2-conformant bundle: the writer emits OKF frontmatter, markdown links and numbered citations natively, and existing llm-wiki vaults migrate with one command.
+**Mode:** mvp
+**Depends on:** Phase 4
+**Requirements:** OKF-01, OKF-02, OKF-03, OKF-04, OKF-05, OKF-06, OKF-07
+**Success Criteria** (what must be TRUE):
+  1. Ingesting a URL or PDF produces pages with OKF v0.2 frontmatter — descriptive `type` from the page directory, `title`, `description`, ISO 8601 UTC `timestamp`, `generated: {by: process:saussunet/<version>, at}` — and zero wikilinks in generated output
+  2. Provenance renders as numbered inline citations with a trailing `# Citations` section, and `sources:` frontmatter entries carry `resource`/`id`/`last_modified`
+  3. Root `index.md` declares `okf_version: "0.2"`; `log.md` entries group under `## YYYY-MM-DD` headings, newest first
+  4. The write-path validator enforces OKF §9 conformance (every non-reserved .md has parseable frontmatter with a non-empty `type`); broken cross-links are tolerated
+  5. `saussunet migrate-okf` converts an llm-wiki vault in place to a conformant bundle (B3Wiki fixture parity) and refuses an already-converted vault
+
+**Superseded contracts (planner note):** the Phase 1/3 "≥2 outbound wikilinks" floor and `[[wikilink]]` convention are superseded by OKF-02 bundle-relative markdown links; Phase 5 LINT-01 "broken wikilinks" must be read as "broken markdown links". Reference conversion + mapping decisions: B3Wiki repo branch `okf` (`scripts/to_okf.py`, `OKF-MAPPING.md`).
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 04.1 to break down)
 
 ### Phase 5: Health Lint + Review & Monitoring UI
 **Goal:** The human is the guardrail: lint runs after every batch, destructive changes wait in a review queue with diffs, and everything is configured and monitored from the web UI.
