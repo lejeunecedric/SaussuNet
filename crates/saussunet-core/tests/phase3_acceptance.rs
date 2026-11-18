@@ -532,14 +532,12 @@ async fn sc4_provenance_and_contested() {
     let (yaml, body) = frontmatter::split(&content);
     let fm = frontmatter::parse(yaml).expect("parses");
     assert!(
-        fm.sources.iter().any(|s| s.as_str() == Some("raw/old.md")),
+        fm.source_paths().iter().any(|s| s == "raw/old.md"),
         "old source kept: {:?}",
         fm.sources
     );
     assert!(
-        fm.sources
-            .iter()
-            .any(|s| s.as_str() == Some(raw_rel().as_str())),
+        fm.source_paths().iter().any(|s| s == raw_rel().as_str()),
         "new raw/ source merged: {:?}",
         fm.sources
     );
