@@ -27,12 +27,16 @@ sources:
 }
 
 fn check(fm_yaml: &str) -> Vec<String> {
-    okf::check_page(fm_yaml, "", okf::DEFAULT_TYPE_VOCAB)
+    okf::check_page(fm_yaml, "", &okf::DEFAULT_TYPE_VOCAB)
 }
 
 /// Assert exactly one violation and that it names the expected rule id.
 fn one(v: Vec<String>, rule: &str) {
-    assert_eq!(v.len(), 1, "expected exactly one {rule} violation, got {v:?}");
+    assert_eq!(
+        v.len(),
+        1,
+        "expected exactly one {rule} violation, got {v:?}"
+    );
     assert!(v[0].contains(rule), "violation {v:?} must name rule {rule}");
 }
 
@@ -51,7 +55,10 @@ fn okf_gate_rejects() {
 
     // W2 — timestamps without an explicit UTC offset (date-only and naive).
     one(
-        check(&clean.replace("timestamp: 2026-11-18T10:00:00+00:00", "timestamp: 2026-11-18")),
+        check(&clean.replace(
+            "timestamp: 2026-11-18T10:00:00+00:00",
+            "timestamp: 2026-11-18",
+        )),
         "W2",
     );
     one(
@@ -81,8 +88,14 @@ fn okf_gate_rejects() {
     );
 
     // W1 — generated.by violating the §7 actor shape.
-    one(check(&clean.replace("by: process:saussunet/0.1.0", "by: saussu net!")), "W1");
+    one(
+        check(&clean.replace("by: process:saussunet/0.1.0", "by: saussu net!")),
+        "W1",
+    );
 
     // W3→E — sources[] entry without a resource.
-    one(check(&clean.replace("  resource: /raw/foo.md\n", "")), "W3->E");
+    one(
+        check(&clean.replace("  resource: /raw/foo.md\n", "")),
+        "W3->E",
+    );
 }

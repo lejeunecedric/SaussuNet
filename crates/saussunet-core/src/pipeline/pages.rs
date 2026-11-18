@@ -286,15 +286,15 @@ fn assemble_page(
     };
 
     // Sources: existing page's list first, then this raw/ path (dedup).
-    let mut sources: Vec<String> = Vec::new();
+    let mut sources: Vec<serde_yml::Value> = Vec::new();
     if !existing_md.trim().is_empty() {
         let (yaml, _) = frontmatter::split(existing_md);
         if let Ok(fm) = frontmatter::parse(yaml) {
             sources = fm.sources;
         }
     }
-    if !sources.iter().any(|s| s == raw_rel) {
-        sources.push(raw_rel.to_string());
+    if !sources.iter().any(|s| s.as_str() == Some(raw_rel)) {
+        sources.push(serde_yml::Value::String(raw_rel.to_string()));
     }
 
     let mut body = String::new();
@@ -323,6 +323,9 @@ fn assemble_page(
         tags,
         sources,
         confidence: None,
+        description: None,
+        timestamp: None,
+        generated: None,
         contested: if content.contested { Some(true) } else { None },
         contradictions: if content.contradictions.is_empty() {
             None

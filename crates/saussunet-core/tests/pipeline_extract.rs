@@ -145,7 +145,9 @@ async fn central_entity_page_created_passing_mention_never_writes_page() {
     let fm = frontmatter::parse(yaml).expect("frontmatter parses");
     let raw_rel = format!("raw/{}-hello-post.md", today());
     assert!(
-        fm.sources.iter().any(|s| s == &raw_rel),
+        fm.sources
+            .iter()
+            .any(|s| s.as_str() == Some(raw_rel.as_str())),
         "sources carries the raw/ path: {:?}",
         fm.sources
     );
@@ -315,11 +317,13 @@ async fn contradiction_keeps_both_claims_and_sets_contested() {
     assert!(body.contains("created by Chad"), "new claim kept");
     let raw_rel = format!("raw/{}-hello-post.md", today());
     assert!(
-        fm.sources.iter().any(|s| s == "raw/old.md"),
+        fm.sources.iter().any(|s| s.as_str() == Some("raw/old.md")),
         "old source kept"
     );
     assert!(
-        fm.sources.iter().any(|s| s == &raw_rel),
+        fm.sources
+            .iter()
+            .any(|s| s.as_str() == Some(raw_rel.as_str())),
         "new source merged"
     );
 }

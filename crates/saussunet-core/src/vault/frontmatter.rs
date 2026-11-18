@@ -30,10 +30,23 @@ pub struct PageFrontmatter {
     pub updated: String,
     #[serde(rename = "type", default)]
     pub page_type: String,
+    /// OKF one-line summary (D-06/D-07); absent on legacy/human pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// OKF last-content-change timestamp (D-08); ISO with explicit offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    /// OKF trust-layer `generated: {by, at}` block (D-06); kept as a raw
+    /// value so it round-trips verbatim through parse/serialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<serde_yml::Value>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Provenance: plain `raw/...` strings on llm-wiki pages, OKF
+    /// `{id, resource, title, last_modified}` maps on generated pages
+    /// (D-13). Both forms round-trip.
     #[serde(default)]
-    pub sources: Vec<String>,
+    pub sources: Vec<serde_yml::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,6 +99,37 @@ pub fn parse(yaml: &str) -> Result<PageFrontmatter> {
         .map_err(|e| CoreError::Frontmatter(format!("invalid YAML frontmatter: {e}")))
 }
 
+impl PageFrontmatter {
+    /// The provenance targets as plain strings: flat entries verbatim, OKF
+    /// map entries via their `resource` (bundle-relative `/raw/...` folded
+    /// back to the vault-relative `raw/...` form).
+    pub fn source_paths(&self) -> Vec<String> {
+        self.sources
+            .iter()
+            .filter_map(|v| match v {
+                serde_yml::Value::String(s) => Some(s.clone()),
+                serde_yml::Value::Mapping(m) => m
+                    .get("resource")
+                    .and_then(|r| r.as_str())
+                    .map(|r| r.trim_start_matches('/').to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Honesty rule (D-05, PROJECT.md): the writer must NEVER emit credibility
+/// fields. Returns one violation per forbidden key found in the preserved
+/// extension keys — the OKF write path refuses such pages.
+pub fn honesty_violations(fm: &PageFrontmatter) -> Vec<String> {
+    const FORBIDDEN: [&str; 3] = ["verified", "status", "stale_after"];
+    FORBIDDEN
+        .iter()
+        .filter(|k| fm.other.contains_key(k))
+        .map(|k| format!("honesty: forbidden trust field {k:?} must never be emitted"))
+        .collect()
+}
+
 /// Validate against the llm-wiki contract (VLET-01): required fields,
 /// `YYYY-MM-DD` dates, page type, taxonomy tags, sources.
 pub fn validate_page(fm: &PageFrontmatter, taxonomy: &[String]) -> Result<()> {
@@ -101,7 +145,11 @@ pub fn validate_page(fm: &PageFrontmatter, taxonomy: &[String]) -> Result<()> {
             )));
         }
     }
-    if !PAGE_TYPES.contains(&fm.page_type.as_str()) {
+    // W5 union: the human/CLI path keeps accepting the legacy lowercase
+    // types while generated pages emit the capitalized OKF vocabulary.
+    if !PAGE_TYPES.contains(&fm.page_type.as_str())
+        && !super::okf::DEFAULT_TYPE_VOCAB.contains(&fm.page_type.as_str())
+    {
         return Err(CoreError::Frontmatter(format!(
             "type must be one of {}|{}, got {:?}",
             PAGE_TYPES[..PAGE_TYPES.len() - 1].join("|"),
@@ -127,19 +175,45 @@ pub fn validate_page(fm: &PageFrontmatter, taxonomy: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Serialize frontmatter + body back into a page in llm-wiki house style:
-/// stable key order (title, created, updated, type, tags, sources, then
-/// present optional fields, then preserved unknown keys), bare `YYYY-MM-DD`
-/// dates and inline lists (MoriNet rule: values stay plain strings — no
-/// YAML date typing), closing `---` on its own line.
+/// Serialize frontmatter + body back into a page. Two modes:
+///
+/// * **flat (llm-wiki house style)** — pages without OKF keys keep the exact
+///   byte-stable legacy output: stable key order (title, created, updated,
+///   type, tags, sources, then present optional fields, then preserved
+///   unknown keys), bare `YYYY-MM-DD` dates and inline lists.
+/// * **OKF mode** — when `description`/`timestamp`/`generated` are present or
+///   `sources` carries map entries, emit the D-06 order
+///   (`type, title, description, tags, timestamp, generated, sources`, then
+///   extension keys) with nested `generated:`/`sources:` built as a
+///   `serde_yml::Value::Mapping` (no hand-rolled nested string pushes).
 pub fn serialize(fm: &PageFrontmatter, body: &str) -> String {
+    if okf_mode(fm) {
+        serialize_okf(fm, body)
+    } else {
+        serialize_flat(fm, body)
+    }
+}
+
+/// True when the frontmatter carries any OKF-mode key (see [`serialize`]).
+fn okf_mode(fm: &PageFrontmatter) -> bool {
+    fm.description.is_some()
+        || fm.timestamp.is_some()
+        || fm.generated.is_some()
+        || fm
+            .sources
+            .iter()
+            .any(|v| !matches!(v, serde_yml::Value::String(_)))
+}
+
+/// Legacy flat serializer — byte-stable for human/CLI writes.
+fn serialize_flat(fm: &PageFrontmatter, body: &str) -> String {
     let mut out = String::from("---\n");
     out.push_str(&format!("title: {}\n", scalar(&fm.title)));
     out.push_str(&format!("created: {}\n", scalar(&fm.created)));
     out.push_str(&format!("updated: {}\n", scalar(&fm.updated)));
     out.push_str(&format!("type: {}\n", scalar(&fm.page_type)));
     out.push_str(&format!("tags: {}\n", flow(&fm.tags)));
-    out.push_str(&format!("sources: {}\n", flow(&fm.sources)));
+    out.push_str(&format!("sources: {}\n", flow(&fm.source_paths())));
     if let Some(c) = &fm.confidence {
         out.push_str(&format!("confidence: {}\n", scalar(c)));
     }
@@ -175,9 +249,80 @@ pub fn serialize(fm: &PageFrontmatter, body: &str) -> String {
     out
 }
 
+/// OKF-mode serializer (D-06): one `serde_yml::Value::Mapping` built in the
+/// locked key order, serialized whole so nested `generated:`/`sources:`
+/// blocks and scalar quoting are YAML-correct by construction.
+fn serialize_okf(fm: &PageFrontmatter, body: &str) -> String {
+    use serde_yml::Value;
+    let mut map = serde_yml::Mapping::new();
+    let mut put = |k: &str, v: Value| {
+        map.insert(k.to_string(), v);
+    };
+    put("type", Value::String(fm.page_type.clone()));
+    put("title", Value::String(fm.title.clone()));
+    if let Some(d) = &fm.description {
+        put("description", Value::String(d.clone()));
+    }
+    put(
+        "tags",
+        Value::Sequence(fm.tags.iter().map(|t| Value::String(t.clone())).collect()),
+    );
+    if let Some(ts) = &fm.timestamp {
+        put("timestamp", Value::String(ts.clone()));
+    }
+    if let Some(gen) = &fm.generated {
+        put("generated", gen.clone());
+    }
+    put("sources", Value::Sequence(fm.sources.clone()));
+    // Extension keys after the OKF block (D-05): llm-wiki keys survive
+    // verbatim, then preserved unknown keys.
+    put("created", Value::String(fm.created.clone()));
+    put("updated", Value::String(fm.updated.clone()));
+    if let Some(c) = &fm.confidence {
+        put("confidence", Value::String(c.clone()));
+    }
+    if let Some(v) = fm.contested {
+        put("contested", Value::Bool(v));
+    }
+    if let Some(list) = &fm.contradictions {
+        put(
+            "contradictions",
+            Value::Sequence(list.iter().map(|t| Value::String(t.clone())).collect()),
+        );
+    }
+    if let Some(v) = fm.protected {
+        put("protected", Value::Bool(v));
+    }
+    if let Some(gh) = &fm.gen_hash {
+        let mut m = serde_yml::Mapping::new();
+        for (k, v) in gh {
+            m.insert(k.clone(), Value::String(v.clone()));
+        }
+        put("gen_hash", Value::Mapping(m));
+    }
+    for (k, v) in &fm.other {
+        map.insert(k.clone(), v.clone());
+    }
+    let mut yaml =
+        serde_yml::to_string(&Value::Mapping(map)).expect("frontmatter mapping must serialize");
+    // noyalib's to_string omits the trailing newline — the closing `---`
+    // must start on its own line per the split contract.
+    if !yaml.ends_with('\n') {
+        yaml.push('\n');
+    }
+    let mut out = String::from("---\n");
+    out.push_str(&yaml);
+    out.push_str("---\n");
+    if !body.starts_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(body);
+    out
+}
+
 /// Plain scalar when safe (llm-wiki house style keeps dates bare), quoted
 /// via serde_yml when the value could confuse a YAML parser.
-fn scalar(s: &str) -> String {
+pub(crate) fn scalar(s: &str) -> String {
     let safe = !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || " ._-/".contains(c))
@@ -245,7 +390,7 @@ mod tests {
             updated: "2026-10-25".to_string(),
             page_type: "concept".to_string(),
             tags: vec!["technology".to_string()],
-            sources: vec!["raw/articles/x.md".to_string()],
+            sources: vec![serde_yml::Value::String("raw/articles/x.md".to_string())],
             ..Default::default()
         }
     }
@@ -371,26 +516,29 @@ mod tests {
         fm.timestamp = Some("2026-11-18T10:00:00+00:00".to_string());
         let mut gen = serde_yml::Mapping::new();
         gen.insert(
-            "by".into(),
+            "by".to_string(),
             serde_yml::Value::String("process:saussunet/0.1.0".to_string()),
         );
         gen.insert(
-            "at".into(),
+            "at".to_string(),
             serde_yml::Value::String("2026-11-18T10:00:00+00:00".to_string()),
         );
         fm.generated = Some(serde_yml::Value::Mapping(gen));
         let mut src = serde_yml::Mapping::new();
-        src.insert("id".into(), serde_yml::Value::String("foo".to_string()));
         src.insert(
-            "resource".into(),
+            "id".to_string(),
+            serde_yml::Value::String("foo".to_string()),
+        );
+        src.insert(
+            "resource".to_string(),
             serde_yml::Value::String("/raw/foo.md".to_string()),
         );
         src.insert(
-            "title".into(),
+            "title".to_string(),
             serde_yml::Value::String("Foo".to_string()),
         );
         src.insert(
-            "last_modified".into(),
+            "last_modified".to_string(),
             serde_yml::Value::String("2026-11-18T09:00:00+00:00".to_string()),
         );
         fm.sources = vec![serde_yml::Value::Mapping(src)];
@@ -400,15 +548,17 @@ mod tests {
     #[test]
     fn serialize_okf_nested() {
         let mut fm = okf_fm();
-        fm.other
-            .insert("future_field".into(), serde_yml::Value::String("kept".into()));
+        fm.other.insert(
+            "future_field".to_string(),
+            serde_yml::Value::String("kept".to_string()),
+        );
         let out = serialize(&fm, "body\n");
         assert!(
-            out.contains("generated:\n  by: process:saussunet/0.1.0\n"),
+            out.contains("generated:\n  by: \"process:saussunet/0.1.0\"\n"),
             "nested generated block: {out}"
         );
         assert!(
-            out.contains("sources:\n- id: foo\n"),
+            out.contains("sources:\n  - id: foo\n"),
             "nested sources list-of-maps: {out}"
         );
         // Round-trips through split + parse with unknown-key preservation.
@@ -421,7 +571,10 @@ mod tests {
     #[test]
     fn serialize_key_order_d06() {
         let out = serialize(&okf_fm(), "body\n");
-        let pos = |k: &str| out.find(k).unwrap_or_else(|| panic!("missing {k} in {out}"));
+        let pos = |k: &str| {
+            out.find(k)
+                .unwrap_or_else(|| panic!("missing {k} in {out}"))
+        };
         assert!(pos("type:") < pos("title:"));
         assert!(pos("title:") < pos("description:"));
         assert!(pos("description:") < pos("tags:"));
@@ -437,7 +590,7 @@ mod tests {
         for key in ["verified", "status", "stale_after"] {
             let mut fm = okf_fm();
             fm.other
-                .insert(key.into(), serde_yml::Value::String("x".into()));
+                .insert(key.to_string(), serde_yml::Value::String("x".to_string()));
             let v = honesty_violations(&fm);
             assert!(
                 v.iter().any(|s| s.contains(key)),

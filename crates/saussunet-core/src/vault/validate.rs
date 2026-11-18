@@ -149,7 +149,7 @@ pub async fn validate_generated_page(
                 violations
                     .push("sources: empty — generated pages must cite raw/ evidence".to_string());
             }
-            for src in &fm.sources {
+            for src in fm.source_paths() {
                 let first = src.split('/').next().unwrap_or("");
                 if WIKI_DIRS.contains(&first) {
                     violations.push(format!(
@@ -159,7 +159,7 @@ pub async fn validate_generated_page(
                     violations.push(format!(
                         "sources: {src:?} is not a raw/ path — generated pages cite raw/ evidence only"
                     ));
-                } else if !raw_target_exists(vault, src).await {
+                } else if !raw_target_exists(vault, &src).await {
                     violations.push(format!("sources: {src:?} does not exist under raw/"));
                 }
             }
