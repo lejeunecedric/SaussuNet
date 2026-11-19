@@ -59,6 +59,21 @@ pub fn parse_entity_subtypes(vault: &Vault) -> Result<Vec<String>> {
         path: path.clone(),
         source: e,
     })?;
+    let subtypes = entity_subtypes_from_text(&content);
+    if subtypes.is_empty() {
+        return Err(CoreError::Vault(format!(
+            "no entity subtypes found under '## Entity Subtypes' in {} — fix SCHEMA.md",
+            path.display()
+        )));
+    }
+    Ok(subtypes)
+}
+
+/// Parse the `## Entity Subtypes` bullets (comma list or one per bullet) out
+/// of SCHEMA.md text. Silent (empty vec) when absent — callers that must
+/// fail-loud use [`parse_entity_subtypes`]; callers with an optional SCHEMA
+/// (e.g. `okf::check_bundle`) union with the default vocabulary instead.
+pub fn entity_subtypes_from_text(content: &str) -> Vec<String> {
     let mut subtypes = Vec::new();
     let mut in_section = false;
     for line in content.lines() {
@@ -80,13 +95,7 @@ pub fn parse_entity_subtypes(vault: &Vault) -> Result<Vec<String>> {
             }
         }
     }
-    if subtypes.is_empty() {
-        return Err(CoreError::Vault(format!(
-            "no entity subtypes found under '## Entity Subtypes' in {} — fix SCHEMA.md",
-            path.display()
-        )));
-    }
-    Ok(subtypes)
+    subtypes
 }
 
 /// Build the SCHEMA.md seed for a vault whose Domain is `domain` (the vault

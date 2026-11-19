@@ -269,3 +269,50 @@ fn check_page_accepts_subtype_only_when_declared() {
         "declared subtype must pass: {v_union:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// M1 regression (04.1 review): `check_bundle` must accept the SCHEMA-declared
+// entity subtypes (the same DEFAULT_TYPE_VOCAB ∪ parse_entity_subtypes union
+// the write path uses), not the hardcoded 7-value set — otherwise
+// `migrate-okf --verify` false-flags legitimate `type: Person` pages (E2).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn check_bundle_accepts_schema_subtypes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("entities")).unwrap();
+    std::fs::write(
+        root.join("SCHEMA.md"),
+        "---\ntype: Schema\ntitle: Wiki Schema\n---\n\n# Wiki Schema\n\n\
+         ## Entity Subtypes\n\n- Person, Organization, Tool, Place, Event, Work\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("entities/ada.md"),
+        "---\ntype: Person\ntitle: Ada Lovelace\n---\n\nAda wrote the first algorithm.\n",
+    )
+    .unwrap();
+    let e2: Vec<String> = okf::check_bundle(root)
+        .into_iter()
+        .filter(|e| e.contains("E2"))
+        .collect();
+    assert!(
+        e2.is_empty(),
+        "Person is a declared subtype — no E2 expected: {e2:?}"
+    );
+
+    // Control: an undeclared type must still be flagged.
+    std::fs::write(
+        root.join("entities/giraffe.md"),
+        "---\ntype: Giraffe\ntitle: Giraffe\n---\n\nTall.\n",
+    )
+    .unwrap();
+    let errors = okf::check_bundle(root);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("E2") && e.contains("Giraffe")),
+        "undeclared type must still be E2: {errors:?}"
+    );
+}

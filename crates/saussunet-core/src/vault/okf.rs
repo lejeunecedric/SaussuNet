@@ -818,9 +818,21 @@ pub fn check_log(body: &str) -> Vec<String> {
 /// those basenames, okflint basename semantics), [`check_page`] to the rest,
 /// and count broken bundle-relative links as INFO (never errors, D-20).
 /// Returns the error strings — an empty vec means the bundle conforms.
+/// The E2 accepted-type set is the same union the write path uses:
+/// [`DEFAULT_TYPE_VOCAB`] ∪ the root `SCHEMA.md`'s `## Entity Subtypes`
+/// (M1: `--verify` must not false-flag legitimate subtype pages).
 /// Consumed by `migrate-okf` (plan 04.1-05) and the Phase 5 lint (D-21).
 pub fn check_bundle(root: &Path) -> Vec<String> {
     let mut errors = Vec::new();
+    // Accepted type vocabulary (D-02/D-03): fixed set ∪ SCHEMA-declared
+    // subtypes when a root SCHEMA.md declares them (silent otherwise —
+    // a bundle without SCHEMA.md is judged on the default set alone).
+    let mut type_vocab: Vec<&str> = DEFAULT_TYPE_VOCAB.to_vec();
+    let subtypes = match std::fs::read_to_string(root.join("SCHEMA.md")) {
+        Ok(text) => super::schema::entity_subtypes_from_text(&text),
+        Err(_) => Vec::new(),
+    };
+    type_vocab.extend(subtypes.iter().map(String::as_str));
     let mut all: Vec<std::path::PathBuf> = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -880,7 +892,7 @@ pub fn check_bundle(root: &Path) -> Vec<String> {
             }
         } else {
             errors.extend(
-                check_page(fm_yaml, body, &DEFAULT_TYPE_VOCAB)
+                check_page(fm_yaml, body, &type_vocab)
                     .into_iter()
                     .map(|v| format!("{rel}: {v}")),
             );
