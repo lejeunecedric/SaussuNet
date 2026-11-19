@@ -328,10 +328,7 @@ pub fn rewrite_wikilinks(body: &str, slug_map: &HashMap<String, (String, String)
             } else if let Some((title, path)) = slug_map.get(stem) {
                 format!("[{}]({})", alias.unwrap_or(title.clone()), path)
             } else {
-                format!(
-                    "[{}](/{clean}.md)",
-                    alias.unwrap_or_else(|| clean.clone())
-                )
+                format!("[{}](/{clean}.md)", alias.unwrap_or_else(|| clean.clone()))
             };
             out.push_str(&rendered);
         }
@@ -360,10 +357,7 @@ pub fn rewrite_citations(body: &str, sources: &[Value]) -> (String, String) {
             let id = m.get("id").and_then(|v| v.as_str());
             let resource = m.get("resource").and_then(|v| v.as_str());
             if let (Some(id), Some(resource)) = (id, resource) {
-                by_resource.insert(
-                    resource.trim_start_matches('/').to_string(),
-                    id.to_string(),
-                );
+                by_resource.insert(resource.trim_start_matches('/').to_string(), id.to_string());
                 let title = m.get("title").and_then(|v| v.as_str()).unwrap_or(id);
                 titles.insert(id.to_string(), title.to_string());
             }
@@ -401,7 +395,12 @@ pub fn rewrite_citations(body: &str, sources: &[Value]) -> (String, String) {
     out.push_str(rest);
     let defs = order
         .iter()
-        .map(|id| format!("[^{id}]: {}", titles.get(id).cloned().unwrap_or_else(|| id.clone())))
+        .map(|id| {
+            format!(
+                "[^{id}]: {}",
+                titles.get(id).cloned().unwrap_or_else(|| id.clone())
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     (out, defs)
@@ -661,8 +660,8 @@ pub async fn rebuild_frontmatter(
 
     // D-12: `^[raw/...]` markers → footnotes keyed to the sources[].id
     // values just built (same walk, same ids); definitions appended once
-    // at body end after a blank line — no `# Citations` section (v0.1 form).
-    let (body, defs) = rewrite_citations(&body, &fm.sources);
+    // at body end after a blank line — the v0.1 citations-heading form is never emitted.
+    let (body, defs) = rewrite_citations(body, &fm.sources);
     let body = if defs.is_empty() {
         body
     } else {

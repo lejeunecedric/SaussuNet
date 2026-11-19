@@ -155,7 +155,10 @@ async fn central_entity_page_created_passing_mention_never_writes_page() {
         "sources carries the raw/ path: {:?}",
         fm.sources
     );
-    assert!(!body.contains("^["), "raw markers rewritten to footnotes: {body}");
+    assert!(
+        !body.contains("^["),
+        "raw markers rewritten to footnotes: {body}"
+    );
     assert!(body.contains("[^"), "footnote citations present: {body}");
     assert!(frontmatter::count_outbound_markdown_links(body) >= 2);
 

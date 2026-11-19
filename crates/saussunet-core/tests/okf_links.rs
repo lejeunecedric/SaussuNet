@@ -244,10 +244,7 @@ fn markdown_links_counted_deduped() {
         1
     );
     // Bare relative paths are not the D-11 root-relative form.
-    assert_eq!(
-        frontmatter::count_outbound_markdown_links("[a](rel.md)"),
-        0
-    );
+    assert_eq!(frontmatter::count_outbound_markdown_links("[a](rel.md)"), 0);
     assert_eq!(frontmatter::count_outbound_markdown_links("no links"), 0);
 }
 
@@ -361,11 +358,20 @@ fn footnote_citations_unit() {
     let body = "A.^[raw/2026-10-30-foo.md] B.^[raw/2026-11-01-bar.md] C.^[raw/2026-10-30-foo.md]";
     let (body2, defs) = okf::rewrite_citations(body, &sources);
     // Markers replaced in place; all occurrences of one target share one id.
-    assert_eq!(body2, "A.[^2026-10-30-foo] B.[^2026-11-01-bar] C.[^2026-10-30-foo]");
+    assert_eq!(
+        body2,
+        "A.[^2026-10-30-foo] B.[^2026-11-01-bar] C.[^2026-10-30-foo]"
+    );
     // Definitions in first-appearance order, keyed to sources[].id.
-    assert_eq!(defs, "[^2026-10-30-foo]: Foo Doc\n[^2026-11-01-bar]: Bar Doc");
+    assert_eq!(
+        defs,
+        "[^2026-10-30-foo]: Foo Doc\n[^2026-11-01-bar]: Bar Doc"
+    );
     assert!(!body2.contains("^["), "no bare ^[ remains");
-    assert!(!defs.contains("# Citations"), "v0.1 form never emitted (D-12)");
+    assert!(
+        !defs.contains("# Citations"),
+        "v0.1 form never emitted (D-12)"
+    );
 }
 
 #[tokio::test]
@@ -418,7 +424,7 @@ async fn footnote_citations() {
     // Markers replaced, deduped (alpha cited twice → one id, two markers).
     assert_eq!(body.matches(&format!("[^{alpha_id}]")).count(), 3); // 2 refs + 1 def
     assert_eq!(body.matches(&format!("[^{beta_id}]")).count(), 2); // 1 ref + 1 def
-    // Definition block at the very end, separated by a blank line.
+                                                                   // Definition block at the very end, separated by a blank line.
     assert!(
         body.contains(&format!("\n\n[^{alpha_id}]: Alpha\n[^{beta_id}]: Beta\n")),
         "definitions at end after blank line: {body}"
@@ -456,7 +462,8 @@ async fn footnotes_on_disk_after_ingest() {
         "keyed footnote marker present: {body}"
     );
     assert!(
-        body.trim_end().ends_with(&format!("[^{id}]: Threshold Post")),
+        body.trim_end()
+            .ends_with(&format!("[^{id}]: Threshold Post")),
         "definition block at end: {body}"
     );
     let src_ids: Vec<String> = fm

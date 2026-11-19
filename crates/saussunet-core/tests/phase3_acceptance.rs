@@ -544,7 +544,10 @@ async fn sc4_provenance_and_contested() {
         "new raw/ source merged: {:?}",
         fm.sources
     );
-    assert!(!body.contains("^["), "raw markers rewritten to footnotes: {body}");
+    assert!(
+        !body.contains("^["),
+        "raw markers rewritten to footnotes: {body}"
+    );
     assert!(body.contains("[^"), "footnote citations present: {body}");
     assert_eq!(fm.contested, Some(true), "contradiction flagged contested");
     assert_eq!(
