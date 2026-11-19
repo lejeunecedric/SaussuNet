@@ -302,13 +302,7 @@ pub async fn write_page(
 
     // 10. log.md: one complete entry (rotation checked inside).
     let action = if is_update { "update" } else { "create" };
-    log::append_entry(
-        vault,
-        action,
-        &fm.title,
-        &[format!("wrote {rel_path}")],
-    )
-    .await?;
+    log::append_entry(vault, action, &fm.title, &[format!("wrote {rel_path}")]).await?;
 
     Ok(WriteOutcome::Written { path: target })
 }

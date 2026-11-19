@@ -51,9 +51,15 @@ async fn setup() -> (TempDir, i64, Arc<Store>, Arc<Vault>) {
     saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "Meta", "Meta", None)
         .await
         .expect("index Meta");
-    saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "JavaScript", "JavaScript", None)
-        .await
-        .expect("index JavaScript");
+    saussunet_core::vault::index::upsert_entry(
+        &vault,
+        "Concepts",
+        "JavaScript",
+        "JavaScript",
+        None,
+    )
+    .await
+    .expect("index JavaScript");
     (tmp, vault.id, Arc::new(store), Arc::new(vault))
 }
 

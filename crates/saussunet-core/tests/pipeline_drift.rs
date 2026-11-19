@@ -78,9 +78,15 @@ async fn setup() -> (TempDir, i64, Arc<Store>, Arc<Vault>) {
     saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "Meta", "Meta", None)
         .await
         .expect("index Meta");
-    saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "JavaScript", "JavaScript", None)
-        .await
-        .expect("index JavaScript");
+    saussunet_core::vault::index::upsert_entry(
+        &vault,
+        "Concepts",
+        "JavaScript",
+        "JavaScript",
+        None,
+    )
+    .await
+    .expect("index JavaScript");
     (tmp, vault.id, Arc::new(store), Arc::new(vault))
 }
 
@@ -235,10 +241,7 @@ async fn changed_source_drifts() {
     let log = read(&vault, "log.md");
     let old_sha = sha256_hex(V1.as_bytes());
     let new_sha = sha256_hex(V2.as_bytes());
-    assert!(
-        log.contains("* **drift**:"),
-        "drift entry present: {log}"
-    );
+    assert!(log.contains("* **drift**:"), "drift entry present: {log}");
     assert!(
         log.contains(&format!("- sha256 {old_sha} -> {new_sha}")),
         "entry carries old -> new digests"
@@ -302,6 +305,9 @@ async fn first_seen_has_no_drift_entry() {
     run_ingest(&store, &vault, &provider_arc(&p1), url, url).await;
 
     let log = read(&vault, "log.md");
-    assert!(log.contains("* **create**:"), "create entries present: {log}");
+    assert!(
+        log.contains("* **create**:"),
+        "create entries present: {log}"
+    );
     assert!(!log.contains("**drift**"), "no drift line on first ingest");
 }

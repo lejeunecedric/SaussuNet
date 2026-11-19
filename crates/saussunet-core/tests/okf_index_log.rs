@@ -59,10 +59,7 @@ async fn index_okf() {
         "new entry format missing:\n{index_md}"
     );
     assert!(
-        index_md.contains(&format!(
-            "> Last updated: {} | Total pages: 1",
-            today()
-        )),
+        index_md.contains(&format!("> Last updated: {} | Total pages: 1", today())),
         "counter must count the new-format entry:\n{index_md}"
     );
 
@@ -84,7 +81,10 @@ async fn index_okf() {
     let index_md = std::fs::read_to_string(vault.root().join("index.md")).unwrap();
     assert!(index_md.contains("- [Foo Title v2](/concepts/foo.md) — new desc"));
     assert!(!index_md.contains("Foo Title]"));
-    assert!(index_md.contains("Total pages: 2"), "dedup by path:\n{index_md}");
+    assert!(
+        index_md.contains("Total pages: 2"),
+        "dedup by path:\n{index_md}"
+    );
 
     // (c) parser side: whitelist non-empty + stem recovered from the path.
     let wl = link_whitelist(&vault, &store).await.expect("whitelist");
@@ -103,8 +103,14 @@ async fn index_okf() {
     forged.push_str("- [Evil](/../etc/passwd.md) — traversal\n");
     std::fs::write(vault.root().join("index.md"), forged).unwrap();
     let wl = link_whitelist(&vault, &store).await.expect("whitelist");
-    assert!(!wl.contains("passwd"), "traversal path must be skipped: {wl:?}");
-    assert!(!wl.contains("etc"), "traversal path must be skipped: {wl:?}");
+    assert!(
+        !wl.contains("passwd"),
+        "traversal path must be skipped: {wl:?}"
+    );
+    assert!(
+        !wl.contains("etc"),
+        "traversal path must be skipped: {wl:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -152,10 +158,8 @@ async fn log_date_groups() {
     assert!(log_md.contains("* **lint**: Clean\n"));
 
     // Second-day entry creates a NEW group ABOVE the older one.
-    let older = format!(
-        "# Wiki Log\n\n> header\n\n## 2020-01-01\n* **create**: Old day\n\n\
-         ## 2019-12-31\n* **create**: Older day\n"
-    );
+    let older = "# Wiki Log\n\n> header\n\n## 2020-01-01\n* **create**: Old day\n\n\
+                 ## 2019-12-31\n* **create**: Older day\n";
     std::fs::write(vault.root().join("log.md"), older).unwrap();
     log::append_entry(&vault, "update", "New day", &[])
         .await

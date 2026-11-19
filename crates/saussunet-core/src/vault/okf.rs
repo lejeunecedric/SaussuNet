@@ -502,9 +502,13 @@ pub fn log_date_ok(s: &str) -> bool {
     r.len() == 10
         && r[4] == '-'
         && r[7] == '-'
-        && r.iter()
-            .enumerate()
-            .all(|(i, c)| if *c == '-' { i == 4 || i == 7 } else { c.is_ascii_digit() })
+        && r.iter().enumerate().all(|(i, c)| {
+            if *c == '-' {
+                i == 4 || i == 7
+            } else {
+                c.is_ascii_digit()
+            }
+        })
 }
 
 /// okflint E4 (okflint.py:88-94, LOG_HEADING + DATE_OK): every `## ` heading
@@ -553,6 +557,8 @@ mod log_heading_tests {
 
     #[test]
     fn trailing_text_after_date_is_e4() {
-        assert!(check_log("## 2026-11-18 extra").iter().any(|v| v.starts_with("E4")));
+        assert!(check_log("## 2026-11-18 extra")
+            .iter()
+            .any(|v| v.starts_with("E4")));
     }
 }

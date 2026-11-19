@@ -84,9 +84,15 @@ async fn setup() -> (TempDir, i64, Arc<Store>, Arc<Vault>) {
     saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "Meta", "Meta", None)
         .await
         .expect("index Meta");
-    saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "JavaScript", "JavaScript", None)
-        .await
-        .expect("index JavaScript");
+    saussunet_core::vault::index::upsert_entry(
+        &vault,
+        "Concepts",
+        "JavaScript",
+        "JavaScript",
+        None,
+    )
+    .await
+    .expect("index JavaScript");
     (tmp, vault.id, Arc::new(store), Arc::new(vault))
 }
 
@@ -383,10 +389,7 @@ async fn sc2_unchanged_noop_changed_drift() {
     )
     .await;
     let log = read(&vault, "log.md");
-    assert!(
-        log.contains("* **drift**:"),
-        "drift entry present: {log}"
-    );
+    assert!(log.contains("* **drift**:"), "drift entry present: {log}");
     assert!(
         log.contains(&format!(
             "- sha256 {} -> {}",

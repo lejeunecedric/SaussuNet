@@ -112,7 +112,10 @@ async fn happy_path_writes_page_index_log_and_projection() {
         .nth(1)
         .and_then(|s| s.split("## Comparisons").next())
         .expect("Concepts section");
-    assert!(concepts.contains("[[walking-skeleton]]"), "{index}");
+    assert!(
+        concepts.contains("](/concepts/walking-skeleton.md)"),
+        "{index}"
+    );
     assert!(index.contains("Total pages: 1"));
 
     // log.md: create entry.
@@ -293,13 +296,13 @@ async fn update_preserves_created_bumps_updated_and_dedupes_index() {
 
     // Index entry not duplicated, counter still 1.
     let index = std::fs::read_to_string(vault.root().join("index.md")).unwrap();
-    assert_eq!(count_needle(&index, "[[walking-skeleton]]"), 1);
+    assert_eq!(count_needle(&index, "](/concepts/walking-skeleton.md)"), 1);
     assert!(index.contains("Total pages: 1"));
 
     // Log has both entries: create then update.
     let log = std::fs::read_to_string(vault.root().join("log.md")).unwrap();
-    assert!(log.contains("create | Walking Skeleton"));
-    assert!(log.contains("update | Walking Skeleton"));
+    assert!(log.contains("* **create**: Walking Skeleton"));
+    assert!(log.contains("* **update**: Walking Skeleton"));
 }
 
 #[tokio::test]
