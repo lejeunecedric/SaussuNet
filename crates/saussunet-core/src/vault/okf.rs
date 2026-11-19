@@ -11,7 +11,8 @@
 //! regex-free scanners follow the `frontmatter::count_outbound_wikilinks`
 //! plain-scan precedent (PATTERNS §12 — no regex crate).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 
 use serde_yml::Value;
 
@@ -186,6 +187,157 @@ pub fn sources_entries(raw_paths: &[String], meta: &BTreeMap<String, RawSourceMe
         }
         out.push(Value::Mapping(map));
     }
+    out
+}
+
+/// D-09: stem → (title, `/path.md`) resolver map. The source list is
+/// explicit and is the single source of truth — the stem discipline of
+/// [`super::validate::link_whitelist`] extended with paths: index.md entries
+/// ∪ page_registry rows ∪ entity `canonical_name`/`page_path` ∪ the page's
+/// own stem. Every path here comes from values already validated against
+/// `PAGE_DIRS` at write time — the resolver never concatenates LLM text into
+/// a path (threat model: path traversal).
+pub async fn build_slug_map(
+    vault: &Vault,
+    store: &Store,
+    own_rel: &str,
+) -> Result<HashMap<String, (String, String)>> {
+    let mut map: HashMap<String, (String, String)> = HashMap::new();
+
+    // 1. index.md entries `- [Title](/path.md) — desc` (D-18 format; same
+    //    line discipline and traversal guards as validate::index_entry_map).
+    if let Ok(content) = tokio::fs::read_to_string(vault.root().join("index.md")).await {
+        for line in content.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("- [") else {
+                continue;
+            };
+            let Some(close) = rest.find("](") else {
+                continue;
+            };
+            let after = &rest[close + 2..];
+            let Some(end) = after.find(')') else {
+                continue;
+            };
+            let title = rest[..close].trim().to_string();
+            let path = after[..end].trim();
+            if !path.starts_with('/') || !path.ends_with(".md") || path.contains("..") {
+                continue;
+            }
+            if let Some(stem) = Path::new(path).file_stem() {
+                let stem = stem.to_string_lossy().to_string();
+                if !stem.is_empty() {
+                    map.insert(stem, (title, path.to_string()));
+                }
+            }
+        }
+    }
+
+    // 2. page_registry rows — registry titles are authoritative over index text.
+    for page in store.list_pages(vault.id).await? {
+        if page.path.contains("..") {
+            continue;
+        }
+        if let Some(stem) = Path::new(&page.path).file_stem() {
+            let stem = stem.to_string_lossy().to_string();
+            if !stem.is_empty() {
+                map.insert(
+                    stem,
+                    (
+                        page.title.clone(),
+                        format!("/{}", page.path.trim_start_matches('/')),
+                    ),
+                );
+            }
+        }
+    }
+
+    // 3. entity registry: canonical_name and page_path stem both point at
+    //    the entity page.
+    for entity in store.list_entities(vault.id).await? {
+        let Some(page_path) = &entity.page_path else {
+            continue;
+        };
+        if page_path.contains("..") {
+            continue;
+        }
+        let rel = format!("/{}", page_path.trim_start_matches('/'));
+        map.insert(
+            entity.canonical_name.clone(),
+            (entity.canonical_name.clone(), rel.clone()),
+        );
+        if let Some(stem) = Path::new(page_path).file_stem() {
+            let stem = stem.to_string_lossy().to_string();
+            if !stem.is_empty() {
+                map.insert(stem, (entity.canonical_name.clone(), rel));
+            }
+        }
+    }
+
+    // 4. the page's own stem (self-links resolve to the page itself; the
+    //    floor counter does not special-case self-links, same as today).
+    if let Some(stem) = Path::new(own_rel).file_stem() {
+        let stem = stem.to_string_lossy().to_string();
+        let own = (
+            stem.clone(),
+            format!("/{}", own_rel.trim_start_matches('/')),
+        );
+        map.entry(stem).or_insert(own);
+    }
+    Ok(map)
+}
+
+/// D-09/D-10/D-11: rewrite every `[[...]]` wikilink in `body` to a
+/// root-relative markdown link via `slug_map` — port of to_okf.py:159-182,
+/// plain-scan walk mirroring [`frontmatter::count_outbound_wikilinks`]:
+/// - `[[stem]]` → `[title](/path.md)`; `[[stem|alias]]` → `[alias](/path.md)`
+///   (alias wins, `]` stripped so alias text cannot escape the link syntax);
+/// - `[[dir/path]]` resolves via the last segment (`.md` suffix stripped);
+/// - unresolvable → `[slug](/slug.md)`, kept as a broken link (§6.1);
+/// - `..`/`/` are stripped from the slug before the broken form renders —
+///   a traversal slug can never produce a `..` path;
+/// - `![[embed]]` is an image, kept verbatim.
+pub fn rewrite_wikilinks(body: &str, slug_map: &HashMap<String, (String, String)>) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(open) = rest.find("[[") {
+        // An embed `![[...]]` is an image, not an outbound page link.
+        let is_embed = open > 0 && rest.as_bytes()[open - 1] == b'!';
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("]]") else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        if is_embed {
+            out.push_str(&rest[open..open + close + 4]);
+        } else {
+            let inner = &after[..close];
+            let (target, alias) = match inner.split_once('|') {
+                Some((t, a)) => (t.trim(), Some(a.trim().replace(']', ""))),
+                None => (inner.trim(), None),
+            };
+            let target = target.split('#').next().unwrap_or("").trim();
+            let stem = target
+                .rsplit('/')
+                .next()
+                .unwrap_or(target)
+                .trim_end_matches(".md");
+            let clean = stem.replace("..", "").replace('/', "");
+            let rendered = if clean.is_empty() {
+                // Nothing sane to link to — keep the original text verbatim.
+                format!("[[{inner}]]")
+            } else if let Some((title, path)) = slug_map.get(stem) {
+                format!("[{}]({})", alias.unwrap_or(title.clone()), path)
+            } else {
+                format!(
+                    "[{}](/{clean}.md)",
+                    alias.unwrap_or_else(|| clean.clone())
+                )
+            };
+            out.push_str(&rendered);
+        }
+        rest = &after[close + 2..];
+    }
+    out.push_str(rest);
     out
 }
 

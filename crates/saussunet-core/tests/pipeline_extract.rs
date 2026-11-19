@@ -156,7 +156,7 @@ async fn central_entity_page_created_passing_mention_never_writes_page() {
         fm.sources
     );
     assert!(body.contains("^[raw/"), "provenance marker present: {body}");
-    assert!(frontmatter::count_outbound_wikilinks(body) >= 2);
+    assert!(frontmatter::count_outbound_markdown_links(body) >= 2);
 
     // PIPE-03: passing mention → no page, but source set recorded (D-17).
     assert!(
@@ -457,7 +457,7 @@ async fn wikilink_floor_rescues_page_without_links() {
     let content = read_page(&vault, "entities/rust.md");
     let (_yaml, body) = frontmatter::split(&content);
     assert!(
-        frontmatter::count_outbound_wikilinks(body) >= 2,
+        frontmatter::count_outbound_markdown_links(body) >= 2,
         "floor must lift the page to the 2-link validator floor: {body}"
     );
     assert!(

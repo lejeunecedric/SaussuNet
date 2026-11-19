@@ -135,10 +135,16 @@ pub async fn write_page(
     let taxonomy = schema::parse_tag_taxonomy(vault)?;
     frontmatter::validate_page(&fm, &taxonomy)?;
 
-    // 3. Wikilink floor (VLET-01 / llm-wiki convention).
-    if frontmatter::count_outbound_wikilinks(body) < 2 {
+    // 3. Link floor (VLET-01 / llm-wiki convention): human pages carry
+    // [[wikilinks]]; OKF-generated pages arrive pre-rewritten to root-relative
+    // markdown links (D-10), so the floor survives on either form. The
+    // generated path enforces its own markdown-link floor earlier in the
+    // funnel (write_generated_page), with a markdown-specific error.
+    if frontmatter::count_outbound_wikilinks(body) < 2
+        && frontmatter::count_outbound_markdown_links(body) < 2
+    {
         return Err(CoreError::Frontmatter(
-            "page requires at least 2 outbound [[wikilinks]]".to_string(),
+            "page requires at least 2 outbound [[wikilinks]] or markdown links".to_string(),
         ));
     }
 
@@ -324,6 +330,19 @@ pub async fn write_generated_page(
     content: &str,
 ) -> Result<WriteOutcome> {
     validate::validate_generated_page(vault, store, rel_path, content).await?;
-    let content = okf::rebuild_frontmatter(vault, store, rel_path, content).await?;
+    // D-09/D-11: deterministic pre-disk wikilink rewrite — the LLM contract
+    // keeps emitting [[slug]]; only bundle-relative markdown links reach disk.
+    let (yaml, body) = frontmatter::split(content);
+    let slug_map = okf::build_slug_map(vault, store, rel_path).await?;
+    let body = okf::rewrite_wikilinks(body, &slug_map);
+    // D-10: the ≥2 outbound floor survives on the generated path, counted on
+    // markdown links AFTER the rewrite.
+    if frontmatter::count_outbound_markdown_links(&body) < 2 {
+        return Err(CoreError::Validation(
+            "generated page requires at least 2 outbound markdown links".to_string(),
+        ));
+    }
+    let content = format!("---\n{yaml}---\n{body}");
+    let content = okf::rebuild_frontmatter(vault, store, rel_path, &content).await?;
     write_page(vault, store, rel_path, &content).await
 }

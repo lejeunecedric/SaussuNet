@@ -372,6 +372,30 @@ pub fn count_outbound_wikilinks(body: &str) -> usize {
     targets.len()
 }
 
+/// Distinct root-relative markdown links `](/target)` in `body`, deduped by
+/// target — the plain-scan port of okflint's `MD_LINK` regex
+/// (`\]\((/[^\)\s]+)\)`, okflint.py:39), same shape as
+/// [`count_outbound_wikilinks`]. Absolute (`http://…`) and bare-relative
+/// (`](x.md)`) targets are not bundle-relative and never counted (D-11).
+pub fn count_outbound_markdown_links(body: &str) -> usize {
+    let mut targets = std::collections::HashSet::new();
+    let mut rest = body;
+    while let Some(pos) = rest.find("](") {
+        let after = &rest[pos + 2..];
+        let Some(target) = after.strip_prefix('/') else {
+            rest = after;
+            continue;
+        };
+        let Some(end) = target.find(')') else { break };
+        let t = &target[..end];
+        if !t.is_empty() && !t.chars().any(char::is_whitespace) {
+            targets.insert(t.to_string());
+        }
+        rest = &target[end..];
+    }
+    targets.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
