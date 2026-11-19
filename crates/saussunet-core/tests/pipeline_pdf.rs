@@ -246,8 +246,8 @@ async fn ingest_pdf_e2e_extracts_pages_with_provenance() {
     let page = std::fs::read_to_string(vault.root.join("concepts/signifier.md"))
         .expect("page written by the shared two-pass pipeline");
     assert!(
-        page.contains(&format!("^[{}]", derived_md_rel())),
-        "provenance marker to the PDF-derived text: {page}"
+        page.contains(&format!("[^{}-sample]", today())),
+        "footnote citation to the PDF-derived text: {page}"
     );
 }
 

@@ -149,8 +149,13 @@ async fn ingest_raw_end_to_end() {
     // The extraction passes ran: page on disk citing the raw watch copy.
     let page = std::fs::read_to_string(vault.root.join("concepts/signifier.md"))
         .expect("page written by the shared two-pass pipeline");
+    let note_id = std::path::Path::new(&raw_rel)
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     assert!(
-        page.contains(&format!("^[{raw_rel}]")),
-        "provenance marker to the raw watch copy: {page}"
+        page.contains(&format!("[^{note_id}]")),
+        "footnote citation to the raw watch copy: {page}"
     );
 }

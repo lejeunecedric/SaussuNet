@@ -341,6 +341,118 @@ pub fn rewrite_wikilinks(body: &str, slug_map: &HashMap<String, (String, String)
     out
 }
 
+/// D-12/D-13/D-14: rewrite `^[raw/...]` provenance markers into markdown
+/// footnotes keyed to `sources[].id` — the first-appearance dedup walk of
+/// to_okf.py:185-194 (shape of [`super::validate::extract_provenance`]),
+/// but footnote output per D-12: the v0.1 `citations_section` (:197-201)
+/// is explicitly NOT ported. Returns `(body_with_markers, definitions)`;
+/// `definitions` holds one `[^id]: <title>` line per distinct source in
+/// first-appearance order (no trailing newline) — the caller appends it
+/// once at body end, separated by a blank line. Ids are READ from
+/// `sources` (built by [`sources_entries`] over the same walk), never
+/// recomputed differently; a target absent from `sources` falls back to
+/// the same stem derivation (only reachable on direct calls).
+pub fn rewrite_citations(body: &str, sources: &[Value]) -> (String, String) {
+    let mut by_resource: BTreeMap<String, String> = BTreeMap::new();
+    let mut titles: BTreeMap<String, String> = BTreeMap::new();
+    for entry in sources {
+        if let Value::Mapping(m) = entry {
+            let id = m.get("id").and_then(|v| v.as_str());
+            let resource = m.get("resource").and_then(|v| v.as_str());
+            if let (Some(id), Some(resource)) = (id, resource) {
+                by_resource.insert(
+                    resource.trim_start_matches('/').to_string(),
+                    id.to_string(),
+                );
+                let title = m.get("title").and_then(|v| v.as_str()).unwrap_or(id);
+                titles.insert(id.to_string(), title.to_string());
+            }
+        }
+    }
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    let mut order: Vec<String> = Vec::new();
+    while let Some(open) = rest.find("^[") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find(']') else { break };
+        let target = after[..close].trim();
+        let id = by_resource.get(target).cloned().or_else(|| {
+            if target.starts_with("raw/") && !target.contains("..") {
+                let file = target.rsplit('/').next().unwrap_or(target);
+                Some(file.strip_suffix(".md").unwrap_or(file).to_string())
+            } else {
+                None
+            }
+        });
+        out.push_str(&rest[..open]);
+        match id {
+            Some(id) => {
+                out.push_str(&format!("[^{id}]"));
+                if !order.contains(&id) {
+                    order.push(id);
+                }
+            }
+            // Marker pointing outside raw/ — the PIPE-06 gate rejects such
+            // pages upstream; kept verbatim if one still reaches here.
+            None => out.push_str(&rest[open..close + 3]),
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+    let defs = order
+        .iter()
+        .map(|id| format!("[^{id}]: {}", titles.get(id).cloned().unwrap_or_else(|| id.clone())))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (out, defs)
+}
+
+/// okflint INFO rule (okflint.py:143-151): number of distinct
+/// bundle-relative markdown link targets (`](/path.md)`) whose file does not
+/// exist under `root`. Broken links are a feature (§6.1) — this is INFO
+/// telemetry for `migrate --verify` (plan 04.1-05) and the Phase 5 lint,
+/// counted and never failed on (D-20/D-22).
+pub fn count_broken_links(root: &Path) -> usize {
+    let mut targets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut rest = text.as_str();
+            while let Some(pos) = rest.find("](") {
+                let after = &rest[pos + 2..];
+                let Some(target) = after.strip_prefix('/') else {
+                    rest = after;
+                    continue;
+                };
+                let Some(end) = target.find(')') else { break };
+                let t = &target[..end];
+                if !t.is_empty() && !t.chars().any(char::is_whitespace) {
+                    targets.insert(t.to_string());
+                }
+                rest = &target[end..];
+            }
+        }
+    }
+    targets
+        .into_iter()
+        .filter(|t| !root.join(t.trim_start_matches('/')).exists())
+        .count()
+}
+
 /// The §11 per-page conformance check (D-20/D-21): okflint rules E1, E2,
 /// E5/W1, W2, W3→E ported verbatim. Returns one violation string per rule
 /// hit (rule id prefixed); an empty vec means the page conforms.
@@ -547,9 +659,19 @@ pub async fn rebuild_frontmatter(
     }
     fm.sources = sources_entries(&paths, &meta);
 
-    let page = frontmatter::serialize(&fm, body);
+    // D-12: `^[raw/...]` markers → footnotes keyed to the sources[].id
+    // values just built (same walk, same ids); definitions appended once
+    // at body end after a blank line — no `# Citations` section (v0.1 form).
+    let (body, defs) = rewrite_citations(&body, &fm.sources);
+    let body = if defs.is_empty() {
+        body
+    } else {
+        format!("{}\n\n{}\n", body.trim_end(), defs)
+    };
+
+    let page = frontmatter::serialize(&fm, &body);
     let (rebuilt_yaml, _) = frontmatter::split(&page);
-    violations.extend(check_page(rebuilt_yaml, body, &DEFAULT_TYPE_VOCAB));
+    violations.extend(check_page(rebuilt_yaml, &body, &DEFAULT_TYPE_VOCAB));
     if !violations.is_empty() {
         return Err(CoreError::Validation(violations.join("; ")));
     }

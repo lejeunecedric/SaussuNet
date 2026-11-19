@@ -580,13 +580,15 @@ async fn sources_footnotes_keyed() {
     let alpha = format!("raw/{}-alpha.md", today());
     let beta = format!("raw/{}-beta.md", today());
 
-    // Case A — page WITH inline markers: footnote ids == sources ids 1:1.
+    // Case A — page WITH inline markers (both sources cited): footnote ids
+    // == sources ids 1:1.
     let content = format!(
-        "---\ntitle: Keyed\ntype: concept\ncreated: {}\nupdated: {}\ntags: [technology]\nsources: [{}, {}]\n---\n\nClaim. ^[{}]\n",
+        "---\ntitle: Keyed\ntype: concept\ncreated: {}\nupdated: {}\ntags: [technology]\nsources: [{}, {}]\n---\n\nClaim one. ^[{}] Then claim two. ^[{}]\n",
         today(),
         today(),
         alpha,
         beta,
+        alpha,
         beta
     );
     let rebuilt = okf::rebuild_frontmatter(&vault, &store, "concepts/keyed.md", &content)
