@@ -61,6 +61,29 @@ enum Command {
     /// Rebuild page_registry from the vault filesystem (D-01: the DB is a
     /// disposable projection — deleting it costs zero content).
     Reindex,
+    /// Convert an existing llm-wiki vault to a conformant OKF v0.2 bundle
+    /// in place (D-23). Defaults to DRY-RUN: prints the report, writes
+    /// nothing. `--apply` converts (undo path: a clean git worktree, or
+    /// `--backup <dir>` to archive the tree first). `--verify` re-checks
+    /// conformance of a converted vault, writing nothing.
+    /// Exit codes: 0 ok · 1 refusal or conformance errors.
+    MigrateOkf {
+        /// Configured vault name to migrate.
+        #[arg(long, default_value = "main")]
+        vault: String,
+        /// Perform the conversion instead of reporting it.
+        #[arg(long)]
+        apply: bool,
+        /// Re-run conformance checks on a converted vault (read-only).
+        #[arg(long)]
+        verify: bool,
+        /// Emit the machine-readable JSON report (D-23).
+        #[arg(long)]
+        json: bool,
+        /// Archive the vault tree into this directory before applying.
+        #[arg(long)]
+        backup: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -106,6 +129,18 @@ fn main() -> anyhow::Result<()> {
                 .enable_all()
                 .build()?
                 .block_on(reindex_cmd())?;
+        }
+        Some(Command::MigrateOkf {
+            vault,
+            apply,
+            verify,
+            json,
+            backup,
+        }) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(migrate_cmd(&vault, apply, verify, json, backup.as_deref()))?;
         }
     }
 
@@ -296,5 +331,53 @@ async fn reindex_cmd() -> anyhow::Result<()> {
     let (store, vault) = saussunet_core::boot_open(&rt).await?;
     let n = saussunet_core::reindex::reindex(&vault, &store).await?;
     println!("reindexed: {n} pages");
+    Ok(())
+}
+
+/// `migrate-okf` command (D-23..D-28): same boot wiring, then the core
+/// converter only — the binary adds nothing but flag plumbing and the
+/// report rendering (human lines, or `serde_json::to_string_pretty` with
+/// `--json`, the conflicts_cmd precedent). `--vault` resolves against the
+/// configured vault; an unknown name is a loud error. Terminal refusal or
+/// conformance errors exit 1 (write_page_cmd exit-code precedent).
+async fn migrate_cmd(
+    name: &str,
+    apply: bool,
+    verify: bool,
+    json: bool,
+    backup: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let config_path = std::path::Path::new("config.toml");
+    let cfg = load_config_or_default(config_path)?;
+    let rt = cfg.resolve()?;
+    if config_path.exists() {
+        saussunet_core::assert_outside_vault(config_path, &rt.vault_root)?;
+    }
+    if rt.vault_name != name {
+        eprintln!(
+            "error: unknown vault {name:?} — config defines {:?} (edit config.toml [vault].name)",
+            rt.vault_name
+        );
+        std::process::exit(1);
+    }
+    let (store, vault) = saussunet_core::boot_open(&rt).await?;
+    let report = if verify {
+        saussunet_core::migrate::verify(&vault).await?
+    } else if apply {
+        saussunet_core::migrate::apply(&vault, &store, backup).await?
+    } else {
+        saussunet_core::migrate::dry_run(&vault).await?
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).context("cannot serialize migrate report")?
+        );
+    } else {
+        print!("{}", report.render_human());
+    }
+    if report.verdict.reason().is_some() {
+        std::process::exit(1);
+    }
     Ok(())
 }

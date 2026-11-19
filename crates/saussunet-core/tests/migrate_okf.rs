@@ -43,6 +43,11 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (String, std::time::SystemTime)> {
         for entry in std::fs::read_dir(&dir).unwrap().flatten() {
             let path = entry.path();
             if path.is_dir() {
+                // .git churns on its own (git status refreshes the index
+                // stat cache) — the zero-write claim is about vault files.
+                if path.file_name().is_some_and(|n| n == ".git") {
+                    continue;
+                }
                 stack.push(path);
                 continue;
             }
@@ -436,6 +441,9 @@ async fn migrate_refusals() {
     // (b) ≥80% generated: threshold — 4/5 refuses, 3/5 proceeds.
     let tmp4 = TempDir::new().expect("tempdir4");
     let (_s4, v4) = setup(&tmp4).await;
+    // The seeded SCHEMA.md would join the non-reserved denominator; the
+    // boundary test counts exactly its 5 pages.
+    std::fs::remove_file(v4.root().join("SCHEMA.md")).expect("drop seeded SCHEMA");
     write(
         v4.root(),
         "index.md",
@@ -453,6 +461,7 @@ async fn migrate_refusals() {
 
     let tmp3 = TempDir::new().expect("tempdir3");
     let (_s3, v3) = setup(&tmp3).await;
+    std::fs::remove_file(v3.root().join("SCHEMA.md")).expect("drop seeded SCHEMA");
     write(
         v3.root(),
         "index.md",
@@ -479,11 +488,24 @@ async fn migrate_refusals() {
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .output()
             .expect("git");
-        assert!(status.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&status.stderr));
+        assert!(
+            status.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
     };
     git(&["init", "-q"]);
     git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
-    git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    git(&[
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    ]);
     std::fs::write(rg.join("concepts/alpha.md"), "# dirty\n").unwrap();
     let before_g = snapshot(&rg);
     let backup = TempDir::new().expect("backup");
@@ -515,10 +537,12 @@ async fn migrate_refusals() {
     build_fixture(&rn);
     let before_n = snapshot(&rn);
     let report = migrate::apply(&vn, &sn, None).await.expect("apply non-git");
-    let reason = report
-        .verdict
-        .reason()
-        .unwrap_or_else(|| panic!("non-git without backup must refuse, got {:?}", report.verdict));
+    let reason = report.verdict.reason().unwrap_or_else(|| {
+        panic!(
+            "non-git without backup must refuse, got {:?}",
+            report.verdict
+        )
+    });
     assert!(reason.contains("no_backup"), "{reason}");
     assert_unchanged(&before_n, &rn);
 
@@ -531,11 +555,16 @@ async fn migrate_refusals() {
         .expect("backup dir")
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.file_name().unwrap_or_default().to_string_lossy().ends_with(".tar.gz"))
+        .filter(|p| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .ends_with(".tar.gz")
+        })
         .collect();
     assert_eq!(archives.len(), 1, "exactly one archive: {archives:?}");
     let listing = std::process::Command::new("tar")
-        .args(["-tzf", &archives[0].to_string_lossy().to_string()])
+        .args(["-tzf", archives[0].to_string_lossy().as_ref()])
         .output()
         .expect("tar");
     let listing = String::from_utf8_lossy(&listing.stdout).to_string();
@@ -548,16 +577,28 @@ async fn migrate_refusals() {
     // on a corrupted converted vault: errors listed, still zero writes.
     let before_v = snapshot(&rn);
     let report = migrate::verify(&vn).await.expect("verify clean");
-    assert_eq!(report.verdict, migrate::Verdict::Clean, "{:?}", report.verdict);
+    assert_eq!(
+        report.verdict,
+        migrate::Verdict::Clean,
+        "{:?}",
+        report.verdict
+    );
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert_unchanged(&before_v, &rn);
 
-    std::fs::write(rn.join("concepts/alpha.md"), "---\ntype: [unclosed\n---\n\nbody\n").unwrap();
+    std::fs::write(
+        rn.join("concepts/alpha.md"),
+        "---\ntype: [unclosed\n---\n\nbody\n",
+    )
+    .unwrap();
     let before_b = snapshot(&rn);
     let report = migrate::verify(&vn).await.expect("verify broken");
     assert!(!report.errors.is_empty(), "broken page must list errors");
     assert!(
-        report.errors.iter().any(|e| e.contains("concepts/alpha.md")),
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("concepts/alpha.md")),
         "{:?}",
         report.errors
     );
@@ -570,28 +611,39 @@ async fn migrate_refusals() {
 #[test]
 fn undo_decision_matrix() {
     // git binary absent → MissingBinary-style error, whatever else is true.
-    let err = migrate::decide_undo(false, false, false, false)
-        .expect_err("git-absent must error");
+    let err = migrate::decide_undo(false, false, false, false).expect_err("git-absent must error");
     assert!(
         matches!(&err, saussunet_core::error::CoreError::MissingBinary { binary, .. } if binary == "git"),
         "{err}"
     );
     // git repo: dirty refuses (backup does not override), clean proceeds.
     assert_eq!(
-        migrate::decide_undo(true, true, true, false).unwrap().as_deref(),
+        migrate::decide_undo(true, true, true, false)
+            .unwrap()
+            .as_deref(),
         Some("dirty_worktree")
     );
     assert_eq!(
-        migrate::decide_undo(true, true, true, true).unwrap().as_deref(),
+        migrate::decide_undo(true, true, true, true)
+            .unwrap()
+            .as_deref(),
         Some("dirty_worktree")
     );
-    assert_eq!(migrate::decide_undo(true, true, false, false).unwrap(), None);
+    assert_eq!(
+        migrate::decide_undo(true, true, false, false).unwrap(),
+        None
+    );
     // non-git: backup required.
     assert_eq!(
-        migrate::decide_undo(true, false, false, false).unwrap().as_deref(),
+        migrate::decide_undo(true, false, false, false)
+            .unwrap()
+            .as_deref(),
         Some("no_backup")
     );
-    assert_eq!(migrate::decide_undo(true, false, false, true).unwrap(), None);
+    assert_eq!(
+        migrate::decide_undo(true, false, false, true).unwrap(),
+        None
+    );
 }
 
 /// Recursively copy `src` into `dst`, skipping `.git` directories.
@@ -633,7 +685,10 @@ async fn migrate_b3wiki_parity() {
     assert!(report.verdict.reason().is_none(), "{:?}", report.verdict);
 
     let errors = okf::check_bundle(vault.root());
-    assert!(errors.is_empty(), "check_bundle on converted B3Wiki: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "check_bundle on converted B3Wiki: {errors:?}"
+    );
 
     // MoriNet scan_conformance rule replicated in-test (okf.rs:16,54-74):
     // root index.md/log.md reserved; version guessed when typed pages are
@@ -648,7 +703,9 @@ async fn migrate_b3wiki_parity() {
             continue;
         }
         total += 1;
-        let Ok(md) = std::fs::read_to_string(path) else { continue };
+        let Ok(md) = std::fs::read_to_string(path) else {
+            continue;
+        };
         let (yaml, _) = frontmatter::split(&md);
         let Ok(fm) = serde_yml::from_str::<serde_yml::Value>(yaml) else {
             continue;
@@ -660,7 +717,7 @@ async fn migrate_b3wiki_parity() {
             .is_some_and(|t| !t.trim().is_empty());
         if typed {
             concepts += 1;
-            if V02_KEYS.iter().any(|k| m.get(*k).is_some()) {
+            if V02_KEYS.iter().any(|k| m.get(k).is_some()) {
                 v02 = true;
             }
         }

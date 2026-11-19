@@ -453,7 +453,13 @@ fn build_tree(files: &[(String, PathBuf, String)]) -> Result<Tree> {
     }
     for (rel, _, content) in files {
         let is_raw = rel.starts_with("raw/");
-        if !is_raw && !is_page_dir(rel) {
+        let base = Path::new(rel)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // Reserved basenames are catalogs, not pages (okflint semantics).
+        let reserved = base == "index.md" || base == "log.md";
+        if reserved || (!is_raw && !is_page_dir(rel)) {
             continue;
         }
         let (yaml, body) = frontmatter::split(content);
@@ -541,20 +547,36 @@ fn convert_page(rel: &str, content: &str, tree: &Tree) -> Result<Option<Outcome>
     if body1 != body {
         applied.push(rules::WIKILINKS.to_string());
     }
-    // sources[] = frontmatter provenance ∪ inline markers, first-appearance
-    // order (same union shape as okf::rebuild_frontmatter).
+    // sources[] = existing OKF map entries preserved verbatim (already
+    // conformant — including non-raw resources such as https URLs) ∪ flat
+    // strings ∪ inline `^[...]` markers, first-appearance order (D-13/D-14).
+    let mut preserved: Vec<serde_yml::Value> = Vec::new();
+    let mut covered: HashSet<String> = HashSet::new();
     let mut paths: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for p in fm
-        .source_paths()
-        .into_iter()
-        .chain(validate::extract_provenance(&body1))
-    {
+    for v in &fm.sources {
+        match v {
+            serde_yml::Value::Mapping(m) => {
+                if let Some(r) = m.get("resource").and_then(|r| r.as_str()) {
+                    covered.insert(r.trim_start_matches('/').to_string());
+                }
+                preserved.push(v.clone());
+            }
+            serde_yml::Value::String(s) if seen.insert(s.clone()) => {
+                paths.push(s.clone());
+            }
+            _ => {}
+        }
+    }
+    for p in validate::extract_provenance(&body1) {
         if seen.insert(p.clone()) {
             paths.push(p);
         }
     }
-    fm.sources = okf::sources_entries(&paths, &tree.raw_meta);
+    paths.retain(|p| !covered.contains(p));
+    let mut sources = preserved;
+    sources.extend(okf::sources_entries(&paths, &tree.raw_meta));
+    fm.sources = sources;
     let (body2, defs) = okf::rewrite_citations(&body1, &fm.sources);
     if !defs.is_empty() || body2 != body1 {
         applied.push(rules::CITATIONS.to_string());
@@ -796,6 +818,15 @@ fn convert_file(rel: &str, content: &str, tree: &Tree) -> Result<Option<Outcome>
             }
         }));
     }
+    // Nested section index.md/log.md are reserved by okflint basename
+    // semantics (no frontmatter allowed) — never convert them into pages.
+    let base = Path::new(rel)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if base == "index.md" || base == "log.md" {
+        return Ok(Some(Outcome::Unchanged));
+    }
     if rel == "SCHEMA.md" {
         return convert_meta(rel, "Schema", content);
     }
@@ -846,12 +877,153 @@ fn finish(report: &mut MigrateReport, root: &Path) {
     };
 }
 
+/// D-24: has this vault already been converted? True when the root `index.md`
+/// frontmatter carries `okf_version`, OR ≥80% of non-reserved pages carry a
+/// `generated:` key (threshold shape of MoriNet `okf.rs:74`; reserved = root
+/// `index.md`/`log.md`, the `okf.rs:54-60` exclusion shape).
+pub fn already_converted(root: &Path) -> Result<bool> {
+    if let Ok(index) = std::fs::read_to_string(root.join("index.md")) {
+        let (yaml, _) = frontmatter::split(&index);
+        if let Ok(serde_yml::Value::Mapping(m)) = serde_yml::from_str::<serde_yml::Value>(yaml) {
+            if m.get("okf_version").is_some() {
+                return Ok(true);
+            }
+        }
+    }
+    let (files, _skipped) = walk(root)?;
+    let mut total = 0usize;
+    let mut generated = 0usize;
+    for (rel, path) in &files {
+        if rel == "index.md" || rel == "log.md" {
+            continue;
+        }
+        total += 1;
+        let Ok(md) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let (yaml, _) = frontmatter::split(&md);
+        // Lenient on purpose: a dirty page must not blind the detection.
+        if let Ok(serde_yml::Value::Mapping(m)) = serde_yml::from_str::<serde_yml::Value>(yaml) {
+            if m.get("generated").is_some() {
+                generated += 1;
+            }
+        }
+    }
+    Ok(total > 0 && generated * 100 >= total * 80)
+}
+
+/// D-25: pure undo-path decision (unit-testable without subprocesses).
+/// `Ok(Some(reason))` = terminal refusal; `Ok(None)` = safe to mutate;
+/// `Err(MissingBinary)` when the `git` binary is unavailable to even ask.
+pub fn decide_undo(
+    git_available: bool,
+    is_repo: bool,
+    worktree_dirty: bool,
+    has_backup: bool,
+) -> Result<Option<String>> {
+    if !git_available {
+        return Err(CoreError::MissingBinary {
+            binary: "git".to_string(),
+            hint: "install git, or pass --backup <dir> to archive the vault before conversion"
+                .to_string(),
+        });
+    }
+    if is_repo {
+        if worktree_dirty {
+            return Ok(Some("dirty_worktree".to_string()));
+        }
+        return Ok(None);
+    }
+    if !has_backup {
+        return Ok(Some("no_backup".to_string()));
+    }
+    Ok(None)
+}
+
+/// Probe git liveness/state and run [`decide_undo`] (PATTERNS §2.3: plain
+/// subprocess, no git crate; git-absent maps to [`CoreError::MissingBinary`]).
+/// Returns `(refusal, needs_backup_archive)`.
+async fn undo_refusal(root: &Path, backup: Option<&Path>) -> Result<(Option<String>, bool)> {
+    let probe = tokio::process::Command::new("git")
+        .args([
+            "-C",
+            &root.to_string_lossy(),
+            "rev-parse",
+            "--is-inside-work-tree",
+        ])
+        .output()
+        .await;
+    let probe = match probe {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((decide_undo(false, false, false, backup.is_some())?, true));
+        }
+        Err(e) => {
+            return Err(CoreError::Io {
+                path: root.to_path_buf(),
+                source: e,
+            })
+        }
+    };
+    let is_repo = probe.status.success() && String::from_utf8_lossy(&probe.stdout).trim() == "true";
+    let mut dirty = false;
+    if is_repo {
+        let status = tokio::process::Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "status", "--porcelain"])
+            .output()
+            .await
+            .map_err(|e| CoreError::Io {
+                path: root.to_path_buf(),
+                source: e,
+            })?;
+        dirty = !String::from_utf8_lossy(&status.stdout).trim().is_empty();
+    }
+    let refusal = decide_undo(true, is_repo, dirty, backup.is_some())?;
+    Ok((refusal, !is_repo))
+}
+
+/// D-25: archive the tree BEFORE any mutation. Any failure is loud and
+/// aborts the apply before a single file is touched.
+async fn create_backup(root: &Path, backup_dir: &Path) -> Result<PathBuf> {
+    tokio::fs::create_dir_all(backup_dir)
+        .await
+        .map_err(|e| CoreError::Io {
+            path: backup_dir.to_path_buf(),
+            source: e,
+        })?;
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let archive = backup_dir.join(format!("vault-{stamp}.tar.gz"));
+    let status = tokio::process::Command::new("tar")
+        .arg("-C")
+        .arg(root)
+        .arg("-czf")
+        .arg(&archive)
+        .arg(".")
+        .status()
+        .await
+        .map_err(|e| CoreError::MissingBinary {
+            binary: "tar".to_string(),
+            hint: format!("backup via tar failed: {e}"),
+        })?;
+    if !status.success() {
+        return Err(CoreError::Vault(format!(
+            "backup archive failed (exit {status}); aborting before any mutation"
+        )));
+    }
+    Ok(archive)
+}
+
 /// D-23: dry-run — the full conversion computed in memory, NOTHING written.
 pub async fn dry_run(vault: &Vault) -> Result<MigrateReport> {
     let root = vault.root.canonicalize().map_err(|e| CoreError::Io {
         path: vault.root.clone(),
         source: e,
     })?;
+    if already_converted(&root)? {
+        return Ok(refused_report(
+            "already_converted: vault already carries OKF v0.2 markers",
+        ));
+    }
     let (files, skipped_symlinks) = load_tree(&root).await?;
     let tree = build_tree(&files)?;
     let mut report = MigrateReport::new(skipped_symlinks);
@@ -863,16 +1035,24 @@ pub async fn dry_run(vault: &Vault) -> Result<MigrateReport> {
     Ok(report)
 }
 
-/// D-23/D-26/D-27: apply — convert in place under `vault.write_lock` through
-/// `atomic::write_atomic` only, re-seed gen_hash over the final bytes, end
-/// with a `log.md` migration entry and a full `reindex` so SQLite matches
-/// the tree. `backup` gates the undo path (Task 2 refusals).
-pub async fn apply(vault: &Vault, store: &Store, backup: Option<&Path>) -> Result<MigrateReport> {
+fn refused_report(reason: &str) -> MigrateReport {
+    let mut report = MigrateReport::new(Vec::new());
+    report.verdict = Verdict::Refused {
+        reason: reason.to_string(),
+    };
+    report
+}
+
+/// The mutation core (no refusal gates): convert every file in place under
+/// `vault.write_lock` through `atomic::write_atomic` only, re-seed gen_hash
+/// over the final bytes (D-26), append the migration log entry and reindex
+/// so SQLite matches the tree (D-27). `apply` = refusal gates + backup +
+/// this; the T13 parity test drives it directly on an already-OKF tree.
+pub async fn convert_tree(vault: &Vault, store: &Store) -> Result<MigrateReport> {
     let root = vault.root.canonicalize().map_err(|e| CoreError::Io {
         path: vault.root.clone(),
         source: e,
     })?;
-    let _ = backup; // refusal wiring lands with the Task-2 checks
     let (files, skipped_symlinks) = load_tree(&root).await?;
     let tree = build_tree(&files)?;
     let mut report = MigrateReport::new(skipped_symlinks);
@@ -904,5 +1084,52 @@ pub async fn apply(vault: &Vault, store: &Store, backup: Option<&Path>) -> Resul
     reindex(vault, store).await?;
     finish(&mut report, &root);
     report.verdict = Verdict::Clean;
+    Ok(report)
+}
+
+/// D-23/D-24/D-25: apply — refusal gates first (already-converted, git-dirty,
+/// non-git-without-backup; there is NO force flag), backup archive BEFORE any
+/// mutation, then the conversion core.
+pub async fn apply(vault: &Vault, store: &Store, backup: Option<&Path>) -> Result<MigrateReport> {
+    let root = vault.root.canonicalize().map_err(|e| CoreError::Io {
+        path: vault.root.clone(),
+        source: e,
+    })?;
+    if already_converted(&root)? {
+        return Ok(refused_report(
+            "already_converted: vault already carries OKF v0.2 markers",
+        ));
+    }
+    let (refusal, needs_backup) = undo_refusal(&root, backup).await?;
+    if let Some(reason) = refusal {
+        return Ok(refused_report(&format!(
+            "{reason}: vault undo path is unsafe (D-25)"
+        )));
+    }
+    if let Some(dir) = backup {
+        if needs_backup {
+            create_backup(&root, dir).await?;
+        }
+    }
+    convert_tree(vault, store).await
+}
+
+/// D-24 `--verify`: re-run conformance on a (converted) vault, writing
+/// nothing. Clean verdict iff `check_bundle` reports zero errors.
+pub async fn verify(vault: &Vault) -> Result<MigrateReport> {
+    let root = vault.root.canonicalize().map_err(|e| CoreError::Io {
+        path: vault.root.clone(),
+        source: e,
+    })?;
+    let mut report = MigrateReport::new(Vec::new());
+    report.errors = okf::check_bundle(&root);
+    report.broken_links = okf::count_broken_links(&root);
+    report.verdict = if report.errors.is_empty() {
+        Verdict::Clean
+    } else {
+        Verdict::Refused {
+            reason: format!("{} conformance error(s)", report.errors.len()),
+        }
+    };
     Ok(report)
 }
