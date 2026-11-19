@@ -734,3 +734,52 @@ async fn migrate_b3wiki_parity() {
         "MoriNet rule: concepts={concepts} total={total} v02={v02}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// H2 regression (04.1 review): `migrate-okf --apply` must leave SCHEMA.md
+// with a `## Entity Subtypes` section — `write_page` hard-requires
+// `parse_entity_subtypes`, so a migrated vault without one can never be
+// written to again.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn migrated_bundle_accepts_writes() {
+    let tmp = TempDir::new().expect("tempdir");
+    let backup = TempDir::new().expect("backup dir");
+    let (store, vault) = setup(&tmp).await;
+    let root = vault.root().to_path_buf();
+    build_fixture(&root);
+    migrate::apply(&vault, &store, Some(backup.path()))
+        .await
+        .expect("apply");
+
+    let schema = std::fs::read_to_string(root.join("SCHEMA.md")).unwrap();
+    assert!(
+        schema.contains("## Entity Subtypes"),
+        "migrated SCHEMA.md must declare entity subtypes:\n{schema}"
+    );
+
+    // The generated funnel must work on the migrated vault: fresh raw
+    // evidence (pipeline-shaped ISO timestamps) + wikilinks that resolve to
+    // migrated pages.
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let raw_fm = saussunet_core::vault::raw::RawFrontmatter {
+        title: "Fresh src".into(),
+        source_url: "https://x.test/fresh".into(),
+        ingested: format!("{today}T12:00:00+00:00"),
+        sha256: "aa".into(),
+    };
+    saussunet_core::vault::raw::write_raw(&vault, None, "fresh-src", "md", &raw_fm, b"fresh body")
+        .await
+        .expect("write raw");
+    let src = format!("raw/{today}-fresh-src.md");
+    let content = format!(
+        "---\ntitle: Fresh\ntype: concept\ncreated: {today}\nupdated: {today}\n\
+         tags: [ai]\nsources: [{src}]\n---\n\n\
+         Fresh synthesizes the source. ^[{src}] See [[alpha]] and [[beta]].\n"
+    );
+    saussunet_core::vault::writer::write_generated_page(&vault, &store, "concepts/fresh.md", &content)
+        .await
+        .expect("post-migration write_generated_page must succeed");
+    assert!(root.join("concepts/fresh.md").exists(), "page must be on disk");
+}

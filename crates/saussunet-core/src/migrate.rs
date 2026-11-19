@@ -688,15 +688,27 @@ fn convert_raw(rel: &str, content: &str) -> Result<Option<Outcome>> {
 /// Root `SCHEMA.md` / `README.md` get `type: Schema` / `Readme` (Pitfall 5:
 /// they count in MoriNet's 80% denominator; B3Wiki precedent).
 fn convert_meta(rel: &str, want: &str, content: &str) -> Result<Option<Outcome>> {
-    let (yaml, body) = frontmatter::split(content);
+    let (yaml, raw_body) = frontmatter::split(content);
     let (fm, _lenient) = parse_fm_lenient(yaml)?;
-    if fm.page_type == want {
+    // A migrated SCHEMA.md must declare entity subtypes: `write_page`
+    // hard-requires `schema::parse_entity_subtypes` (fail-loud), so a
+    // legacy body without the section would brick every post-migration
+    // write (H2). Append the default vocabulary when absent.
+    let body = if want == "Schema" && !raw_body.contains("## Entity Subtypes") {
+        format!(
+            "{}\n\n## Entity Subtypes\nEvery `entities/` page declares exactly one of these as its `type`. A subtype\noutside this list folds to `Entity` — the fold is deterministic, never an error.\n\n- Person, Organization, Tool, Place, Event, Work\n",
+            raw_body.trim_end()
+        )
+    } else {
+        raw_body.to_string()
+    };
+    if fm.page_type == want && body == raw_body {
         return Ok(Some(Outcome::Unchanged));
     }
     let title = if !fm.title.trim().is_empty() {
         fm.title.trim().to_string()
     } else {
-        let h1 = first_h1(body);
+        let h1 = first_h1(&body);
         if h1.is_empty() {
             stem_of(rel)
         } else {
