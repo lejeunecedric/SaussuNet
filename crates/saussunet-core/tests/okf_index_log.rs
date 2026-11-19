@@ -228,3 +228,42 @@ async fn log_injection_neutralized() {
     assert!(!log_md.contains("## ["));
     assert!(log_md.contains("##2026-01-01"), "collapsed, not dropped");
 }
+
+// ---------------------------------------------------------------------------
+// H1 regression (04.1 review): appends into an EXISTING date group must not
+// re-emit the header block (the Some(p) branch sliced `lines[..=p]`, which
+// re-included `lines[..header_end]` already present in `out`).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn append_into_existing_group_keeps_single_header() {
+    let (_tmp, _store, vault) = setup().await;
+    // The seeded log already contains today's group, so BOTH appends below
+    // take the existing-group (Some(p)) branch.
+    log::append_entry(
+        &vault,
+        "ingest",
+        "First source",
+        &["wrote concepts/first.md".to_string()],
+    )
+    .await
+    .expect("append 1");
+    log::append_entry(
+        &vault,
+        "update",
+        "Second page",
+        &["wrote concepts/second.md".to_string()],
+    )
+    .await
+    .expect("append 2");
+    let log_md = std::fs::read_to_string(vault.root().join("log.md")).unwrap();
+    assert_eq!(
+        log_md.matches("# Wiki Log").count(),
+        1,
+        "header block duplicated by appends:\n{log_md}"
+    );
+    // Both entries survive, newest first inside today's group.
+    assert!(log_md.contains("* **update**: Second page"));
+    assert!(log_md.contains("* **ingest**: First source"));
+    assert!(log_md.find("**update**") < log_md.find("**ingest**"));
+}

@@ -134,7 +134,10 @@ pub async fn append_entry(
         .map(|p| header_end + p);
     match today_pos {
         Some(p) => {
-            out.extend(lines[..=p].iter().map(|l| l.to_string()));
+            // `out` already holds `lines[..header_end]` — extend only with
+            // the region between the header and today's heading, or the
+            // header block would be re-emitted on every append (H1).
+            out.extend(lines[header_end..=p].iter().map(|l| l.to_string()));
             out.extend(entry_lines.clone());
             out.extend(lines[p + 1..].iter().map(|l| l.to_string()));
         }
