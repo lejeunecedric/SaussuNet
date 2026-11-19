@@ -84,6 +84,10 @@ pub struct PageContent {
     pub tags: Vec<String>,
     #[serde(default)]
     pub summary: String,
+    /// D-07: first-class one-line frontmatter summary (wins over the
+    /// first-sentence fallback in `okf::rebuild_frontmatter`).
+    #[serde(default)]
+    pub description: String,
     #[serde(default)]
     pub sections: Vec<Section>,
     #[serde(default)]
@@ -97,8 +101,9 @@ impl PageContent {
     pub fn json_schema_hint() -> serde_json::Value {
         serde_json::json!({
             "title": "React",
-            "page_type": "entity",
+            "page_type": "Tool",
             "tags": ["technology"],
+            "description": "React is a JavaScript UI library maintained by Meta.",
             "summary": "React is a JavaScript UI library ... ^[raw/2026-10-30-post.md]",
             "sections": [{
                 "heading": "Overview",

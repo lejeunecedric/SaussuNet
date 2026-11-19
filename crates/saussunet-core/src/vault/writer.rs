@@ -130,10 +130,13 @@ pub async fn write_page(
     };
 
     // 2. Frontmatter: split (never truncates), parse, validate vs taxonomy.
+    // The SCHEMA-declared entity subtypes (D-03) extend the accepted types —
+    // the funnel sees OKF pages already carrying subtype `type` values.
     let (yaml, body) = frontmatter::split(content);
     let mut fm = frontmatter::parse(yaml)?;
     let taxonomy = schema::parse_tag_taxonomy(vault)?;
-    frontmatter::validate_page(&fm, &taxonomy)?;
+    let subtypes = schema::parse_entity_subtypes(vault)?;
+    frontmatter::validate_page_with_subtypes(&fm, &taxonomy, &subtypes)?;
 
     // 3. Link floor (VLET-01 / llm-wiki convention): human pages carry
     // [[wikilinks]]; OKF-generated pages arrive pre-rewritten to root-relative

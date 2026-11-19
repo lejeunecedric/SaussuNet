@@ -91,6 +91,9 @@ pub async fn gate_and_write(
     pass1: &ExtractCandidates,
 ) -> Result<Vec<PathBuf>> {
     let taxonomy = schema::parse_tag_taxonomy(vault)?;
+    // D-03: the SCHEMA-declared entity subtype vocabulary gates pass-2's
+    // page_type for entity pages (tolerant fold, never an error).
+    let subtypes = schema::parse_entity_subtypes(vault)?;
     let mut written = Vec::new();
     let mut rejected: u32 = 0;
 
@@ -166,7 +169,14 @@ pub async fn gate_and_write(
             raw_rel,
             &existing,
             &taxonomy,
+            &subtypes,
         );
+        // The registry records the FOLDED page type (D-03 subtype for
+        // entities) — never the model's raw string.
+        let stored_type = match frontmatter::parse(frontmatter::split(&page).0) {
+            Ok(fm) => fm.page_type,
+            Err(_) => kind_str(candidate.kind).to_string(),
+        };
         // UAT-03 live finding: small models routinely ignore the "≥2
         // [[wikilinks]]" instruction and every such page died at the
         // validator. Deterministic rescue: append a Related floor linking
@@ -225,7 +235,7 @@ pub async fn gate_and_write(
                         &canonical,
                         &aliases_json,
                         Some(&rel_path),
-                        Some(kind_str(candidate.kind)),
+                        Some(&stored_type),
                     )
                     .await?;
                 written.push(path);
@@ -263,6 +273,7 @@ fn assemble_page(
     raw_rel: &str,
     existing_md: &str,
     taxonomy: &[String],
+    subtypes: &[String],
 ) -> String {
     let today = Utc::now().format("%Y-%m-%d").to_string();
 
@@ -279,7 +290,15 @@ fn assemble_page(
     }
 
     // Page type: trust the model only within the taxonomy of page types.
-    let page_type = if frontmatter::PAGE_TYPES.contains(&content.page_type.as_str()) {
+    // Entity pages (D-03): the SCHEMA-declared subtype verbatim; unknown
+    // or absent folds to `Entity` — tolerant, never an error (Phase 2 D-05).
+    let page_type = if kind == CandidateKind::Entity {
+        if subtypes.iter().any(|s| s == &content.page_type) {
+            content.page_type.clone()
+        } else {
+            "Entity".to_string()
+        }
+    } else if frontmatter::PAGE_TYPES.contains(&content.page_type.as_str()) {
         content.page_type.clone()
     } else {
         kind_str(kind).to_string()
@@ -323,7 +342,11 @@ fn assemble_page(
         tags,
         sources,
         confidence: None,
-        description: None,
+        description: if content.description.trim().is_empty() {
+            None
+        } else {
+            Some(content.description.trim().to_string())
+        },
         timestamp: None,
         generated: None,
         contested: if content.contested { Some(true) } else { None },

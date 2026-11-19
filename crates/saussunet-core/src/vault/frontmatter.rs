@@ -133,6 +133,18 @@ pub fn honesty_violations(fm: &PageFrontmatter) -> Vec<String> {
 /// Validate against the llm-wiki contract (VLET-01): required fields,
 /// `YYYY-MM-DD` dates, page type, taxonomy tags, sources.
 pub fn validate_page(fm: &PageFrontmatter, taxonomy: &[String]) -> Result<()> {
+    validate_page_with_subtypes(fm, taxonomy, &[])
+}
+
+/// [`validate_page`] plus the SCHEMA-declared entity subtypes (D-03):
+/// `extra_types` (from `schema::parse_entity_subtypes`) extends the
+/// accepted `type` values — the gate accepts exactly the declared
+/// vocabulary, never more.
+pub fn validate_page_with_subtypes(
+    fm: &PageFrontmatter,
+    taxonomy: &[String],
+    extra_types: &[String],
+) -> Result<()> {
     if fm.title.trim().is_empty() {
         return Err(CoreError::Frontmatter(
             "title must be non-empty".to_string(),
@@ -149,6 +161,7 @@ pub fn validate_page(fm: &PageFrontmatter, taxonomy: &[String]) -> Result<()> {
     // types while generated pages emit the capitalized OKF vocabulary.
     if !PAGE_TYPES.contains(&fm.page_type.as_str())
         && !super::okf::DEFAULT_TYPE_VOCAB.contains(&fm.page_type.as_str())
+        && !extra_types.contains(&fm.page_type)
     {
         return Err(CoreError::Frontmatter(format!(
             "type must be one of {}|{}, got {:?}",

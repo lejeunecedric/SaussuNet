@@ -165,11 +165,14 @@ pub async fn validate_generated_page(
 ) -> Result<()> {
     let mut violations: Vec<String> = Vec::new();
 
-    // 1. Frontmatter schema gate (reuse the llm-wiki contract).
+    // 1. Frontmatter schema gate (reuse the llm-wiki contract). The
+    // SCHEMA-declared entity subtypes (D-03) extend the accepted `type`
+    // values — gate acceptance equals the vault's declared contract.
     let (yaml, body) = frontmatter::split(content);
     match frontmatter::parse(yaml).and_then(|fm| {
         let taxonomy = schema::parse_tag_taxonomy(vault)?;
-        frontmatter::validate_page(&fm, &taxonomy)?;
+        let subtypes = schema::parse_entity_subtypes(vault)?;
+        frontmatter::validate_page_with_subtypes(&fm, &taxonomy, &subtypes)?;
         Ok(fm)
     }) {
         Ok(fm) => {

@@ -586,17 +586,24 @@ pub async fn rebuild_frontmatter(
 
     let mut violations = frontmatter::honesty_violations(&fm);
 
-    // Type: keep a value already in the emitted capitalized vocabulary
-    // (registry `page_type` stores lowercase today → tolerant fold to the
-    // directory map; plan 04.1-04 wires SCHEMA subtypes through here).
-    fm.page_type = if DEFAULT_TYPE_VOCAB.contains(&fm.page_type.as_str()) {
+    // Accepted type vocabulary (D-02/D-03): the fixed capitalized set ∪
+    // the SCHEMA-declared entity subtypes (fail-loud parse, same posture
+    // as the tag-taxonomy gate upstream).
+    let subtypes = crate::vault::schema::parse_entity_subtypes(vault)?;
+    let mut type_vocab: Vec<&str> = DEFAULT_TYPE_VOCAB.to_vec();
+    type_vocab.extend(subtypes.iter().map(String::as_str));
+
+    // Type: keep a value already in the accepted vocabulary — SCHEMA
+    // subtypes arrive capitalized from the pipeline's tolerant fold, and
+    // the registry stores the folded subtype for entities/ pages.
+    fm.page_type = if type_vocab.contains(&fm.page_type.as_str()) {
         fm.page_type.clone()
     } else if let Ok(entities) = store.list_entities(vault.id).await {
         entities
             .iter()
             .find(|e| e.page_path.as_deref() == Some(rel_path))
             .and_then(|e| e.page_type.clone())
-            .filter(|t| DEFAULT_TYPE_VOCAB.contains(&t.as_str()))
+            .filter(|t| type_vocab.contains(&t.as_str()))
             .unwrap_or_else(|| type_for_dir(rel_path).to_string())
     } else {
         type_for_dir(rel_path).to_string()
@@ -670,7 +677,7 @@ pub async fn rebuild_frontmatter(
 
     let page = frontmatter::serialize(&fm, &body);
     let (rebuilt_yaml, _) = frontmatter::split(&page);
-    violations.extend(check_page(rebuilt_yaml, &body, &DEFAULT_TYPE_VOCAB));
+    violations.extend(check_page(rebuilt_yaml, &body, &type_vocab));
     if !violations.is_empty() {
         return Err(CoreError::Validation(violations.join("; ")));
     }
