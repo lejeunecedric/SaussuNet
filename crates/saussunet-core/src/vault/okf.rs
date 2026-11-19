@@ -812,6 +812,85 @@ pub fn check_log(body: &str) -> Vec<String> {
     violations
 }
 
+/// Full okflint `check_bundle` port (okflint.py:59-152): walk every `.md`
+/// under `root` (SKIP_DIRS honored, symlinks skipped), apply the reserved
+/// rules (E3/W0/E4) to root `index.md`/`log.md` (and any nested file with
+/// those basenames, okflint basename semantics), [`check_page`] to the rest,
+/// and count broken bundle-relative links as INFO (never errors, D-20).
+/// Returns the error strings — an empty vec means the bundle conforms.
+/// Consumed by `migrate-okf` (plan 04.1-05) and the Phase 5 lint (D-21).
+pub fn check_bundle(root: &Path) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut all: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if crate::migrate::SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue; // never followed (threat model)
+            }
+            if ft.is_dir() {
+                stack.push(path);
+            } else if ft.is_file() && name.ends_with(".md") {
+                all.push(path);
+            }
+        }
+    }
+    all.sort();
+    for path in all {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let base = Path::new(&rel)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            errors.push(format!("E1 {rel}: unreadable file"));
+            continue;
+        };
+        let (fm_yaml, body) = frontmatter::split(&raw);
+        let fm_present = !fm_yaml.trim().is_empty();
+        if base == "index.md" || base == "log.md" {
+            if fm_present && rel != "index.md" {
+                errors.push(format!("E3 {rel}: index/log.md must carry no frontmatter"));
+            } else if fm_present {
+                match serde_yml::from_str::<Value>(fm_yaml) {
+                    Ok(Value::Mapping(m)) => {
+                        let keys: Vec<String> = m.keys().cloned().collect();
+                        errors.extend(check_reserved("index.md", true, &keys));
+                    }
+                    Ok(_) => errors.push(format!("E1 {rel}: frontmatter is not a mapping")),
+                    Err(e) => errors.push(format!("E1 {rel}: unparseable frontmatter: {e}")),
+                }
+            }
+            if base == "log.md" {
+                errors.extend(check_log(body).into_iter().map(|v| format!("{rel}: {v}")));
+            }
+        } else {
+            errors.extend(
+                check_page(fm_yaml, body, &DEFAULT_TYPE_VOCAB)
+                    .into_iter()
+                    .map(|v| format!("{rel}: {v}")),
+            );
+        }
+    }
+    // INFO: broken bundle-relative links are counted, never failed (§5.3).
+    let _ = count_broken_links(root);
+    errors
+}
+
 #[cfg(test)]
 mod log_heading_tests {
     use super::check_log;

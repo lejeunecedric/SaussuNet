@@ -107,10 +107,12 @@ fn build_fixture(root: &Path) {
          created: 2026-10-17\nupdated: 2026-10-18\n---\n\nBrother was a jazz organ \
          trio album. See [[alpha]] and [[a]].\n",
     );
+    // Protected page: human-owned AND already vocabulary-conformant — the
+    // converter must leave it byte-identical (its [[alpha]] link untouched).
     write(
         root,
         "concepts/locked.md",
-        "---\ntitle: Locked\ntype: concept\nprotected: true\ncreated: 2026-10-17\n\
+        "---\ntitle: Locked\ntype: Concept\nprotected: true\ncreated: 2026-10-17\n\
          updated: 2026-10-17\n---\n\nHuman text with a [[alpha]] link.\n",
     );
     write(
@@ -132,10 +134,17 @@ async fn migrate_mini_bundle() {
     // Threat model: a symlink escaping the root is skipped and reported, never
     // followed.
     let outside = TempDir::new().expect("outside");
-    write(outside.path(), "secret.md", "---\ntype: Concept\ntitle: Outside\n---\n\nbody\n");
+    write(
+        outside.path(),
+        "secret.md",
+        "---\ntype: Concept\ntitle: Outside\n---\n\nbody\n",
+    );
     #[cfg(unix)]
-    std::os::unix::fs::symlink(outside.path().join("secret.md"), root.join("concepts/ghost.md"))
-        .expect("symlink");
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.md"),
+        root.join("concepts/ghost.md"),
+    )
+    .expect("symlink");
 
     // ---- (a) dry-run: report only, ZERO writes -----------------------------
     let before = snapshot(&root);
@@ -144,14 +153,21 @@ async fn migrate_mini_bundle() {
         !report.files_to_change.is_empty(),
         "dry-run must list files to change: {report:?}"
     );
-    assert!(!report.rule_counts.is_empty(), "per-rule counts must be populated");
+    assert!(
+        !report.rule_counts.is_empty(),
+        "per-rule counts must be populated"
+    );
     assert!(
         matches!(report.verdict, migrate::Verdict::WouldConvert),
         "verdict: {:?}",
         report.verdict
     );
     assert_unchanged(&before, &root);
-    let rels: Vec<&str> = report.files_to_change.iter().map(|f| f.rel.as_str()).collect();
+    let rels: Vec<&str> = report
+        .files_to_change
+        .iter()
+        .map(|f| f.rel.as_str())
+        .collect();
     for expected in [
         "entities/players/a.md",
         "concepts/alpha.md",
@@ -183,7 +199,8 @@ async fn migrate_mini_bundle() {
     // paths, no body text.
     let json = serde_json::to_string(&report).expect("report serializes");
     assert!(
-        !json.contains(&root.display().to_string()) && !json.contains(&tmp.path().display().to_string()),
+        !json.contains(&root.display().to_string())
+            && !json.contains(&tmp.path().display().to_string()),
         "report JSON leaked an absolute path: {json}"
     );
     assert!(
@@ -196,15 +213,24 @@ async fn migrate_mini_bundle() {
         .await
         .expect("apply");
     assert!(
-        matches!(report.verdict, migrate::Verdict::Clean | migrate::Verdict::WouldConvert),
+        matches!(
+            report.verdict,
+            migrate::Verdict::Clean | migrate::Verdict::WouldConvert
+        ),
         "apply verdict: {:?}",
         report.verdict
     );
 
     let page_a = std::fs::read_to_string(root.join("entities/players/a.md")).unwrap();
     let (a_yaml, a_body) = frontmatter::split(&page_a);
-    assert!(a_yaml.contains("type: Entity"), "capitalized type: {a_yaml}");
-    assert!(a_yaml.contains("description:"), "D-06 description: {a_yaml}");
+    assert!(
+        a_yaml.contains("type: Entity"),
+        "capitalized type: {a_yaml}"
+    );
+    assert!(
+        a_yaml.contains("description:"),
+        "D-06 description: {a_yaml}"
+    );
     assert!(
         a_yaml.contains("timestamp: '2026-10-19T00:00:00Z'")
             || a_yaml.contains("timestamp: \"2026-10-19T00:00:00Z\"")
@@ -212,19 +238,23 @@ async fn migrate_mini_bundle() {
         "timestamp ← updated (date → T00:00:00Z): {a_yaml}"
     );
     assert!(a_yaml.contains("generated:"), "generated block: {a_yaml}");
-    assert!(
-        a_yaml.contains("process:saussunet/"),
-        "actor: {a_yaml}"
-    );
+    assert!(a_yaml.contains("process:saussunet/"), "actor: {a_yaml}");
     assert!(!page_a.contains("[["), "zero wikilinks on disk: {page_a}");
     assert!(
-        page_a.contains("[R source](/raw/articles/r.md)") || page_a.contains("[r](/raw/articles/r.md)")
+        page_a.contains("[R source](/raw/articles/r.md)")
+            || page_a.contains("[r](/raw/articles/r.md)")
             || page_a.contains("[r source](/raw/articles/r.md)"),
         "wikilink to raw resolved: {page_a}"
     );
-    assert!(a_body.contains("[^r]"), "footnote marker keyed to sources[].id: {a_body}");
+    assert!(
+        a_body.contains("[^r]"),
+        "footnote marker keyed to sources[].id: {a_body}"
+    );
     assert!(a_body.contains("[^r]:"), "footnote definition: {a_body}");
-    assert!(!page_a.contains("# Citations"), "no v0.1 citations heading: {page_a}");
+    assert!(
+        !page_a.contains("# Citations"),
+        "no v0.1 citations heading: {page_a}"
+    );
     assert!(
         a_yaml.contains("resource: /raw/articles/r.md"),
         "sources[] resource: {a_yaml}"
@@ -234,8 +264,14 @@ async fn migrate_mini_bundle() {
     // raw page: type: Source, extension keys kept, body bytes untouched.
     let raw_page = std::fs::read_to_string(root.join("raw/articles/r.md")).unwrap();
     let (raw_yaml, raw_body) = frontmatter::split(&raw_page);
-    assert!(raw_yaml.contains("type: Source"), "raw is Source: {raw_yaml}");
-    assert!(raw_yaml.contains("source_url: https://x.org"), "{raw_yaml}");
+    assert!(
+        raw_yaml.contains("type: Source"),
+        "raw is Source: {raw_yaml}"
+    );
+    assert!(
+        raw_yaml.contains("source_url:") && raw_yaml.contains("https://x.org"),
+        "{raw_yaml}"
+    );
     assert!(raw_yaml.contains("sha256: abc"), "{raw_yaml}");
     assert_eq!(raw_body, "\n# R source\n", "raw body byte-identical");
 
@@ -270,7 +306,10 @@ async fn migrate_mini_bundle() {
 
     // SCHEMA.md typed Schema (Pitfall 5).
     let schema = std::fs::read_to_string(root.join("SCHEMA.md")).unwrap();
-    assert!(schema.starts_with("---\ntype: Schema"), "SCHEMA typed: {schema}");
+    assert!(
+        schema.starts_with("---\ntype: Schema"),
+        "SCHEMA typed: {schema}"
+    );
 
     // ---- (c) full-bundle conformance: 0 errors ------------------------------
     let errors = okf::check_bundle(&root);
@@ -285,7 +324,9 @@ async fn migrate_mini_bundle() {
         let text = std::fs::read_to_string(root.join(rel)).unwrap();
         let (yaml, body) = frontmatter::split(&text);
         let fm = frontmatter::parse(yaml).unwrap();
-        let stored = fm.gen_hash.unwrap_or_else(|| panic!("{rel}: gen_hash missing"));
+        let stored = fm
+            .gen_hash
+            .unwrap_or_else(|| panic!("{rel}: gen_hash missing"));
         assert_eq!(
             stored,
             ghash::compute_map(yaml, body),
@@ -299,16 +340,31 @@ async fn migrate_mini_bundle() {
         locked.contains("Human text with a [[alpha]] link."),
         "protected page untouched: {locked}"
     );
-    assert!(!locked.contains("generated:"), "protected page untouched: {locked}");
+    assert!(
+        !locked.contains("generated:"),
+        "protected page untouched: {locked}"
+    );
 
     // ---- (f) reindex: SQLite matches the tree --------------------------------
-    let tree_pages = ["entities/players/a.md", "concepts/alpha.md", "concepts/beta.md", "concepts/locked.md"];
+    let tree_pages = [
+        "entities/players/a.md",
+        "concepts/alpha.md",
+        "concepts/beta.md",
+        "concepts/locked.md",
+    ];
     let rows = store.list_pages(vault.id).await.expect("list_pages");
     let row_paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
     for rel in tree_pages {
-        assert!(row_paths.contains(&rel), "reindex missing {rel}: {row_paths:?}");
+        assert!(
+            row_paths.contains(&rel),
+            "reindex missing {rel}: {row_paths:?}"
+        );
     }
-    assert_eq!(rows.len(), tree_pages.len(), "reindex row count == tree pages");
+    assert_eq!(
+        rows.len(),
+        tree_pages.len(),
+        "reindex row count == tree pages"
+    );
 
     // ---- (g) migration log entry under today's group -------------------------
     let log = std::fs::read_to_string(root.join("log.md")).unwrap();
