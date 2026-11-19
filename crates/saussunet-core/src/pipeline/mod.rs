@@ -502,14 +502,11 @@ async fn ingest_url(
             .replace('\\', "/");
         vault::log::append_entry(
             vault,
-            &format!(
-                "## [{}] drift | {}",
-                Utc::now().format("%Y-%m-%d"),
-                crate::vault::writer::sanitize_for_nav(subject)
-            ),
+            "drift",
+            subject,
             &[
-                format!("- sha256 {old_sha} -> {}", result.sha256),
-                format!("- re-ingested {drift_raw_rel}"),
+                format!("sha256 {old_sha} -> {}", result.sha256),
+                format!("re-ingested {drift_raw_rel}"),
             ],
         )
         .await?;

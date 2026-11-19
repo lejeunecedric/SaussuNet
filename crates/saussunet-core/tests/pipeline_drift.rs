@@ -236,7 +236,7 @@ async fn changed_source_drifts() {
     let old_sha = sha256_hex(V1.as_bytes());
     let new_sha = sha256_hex(V2.as_bytes());
     assert!(
-        log.contains(&format!("## [{}] drift |", today())),
+        log.contains("* **drift**:"),
         "drift entry present: {log}"
     );
     assert!(
@@ -302,6 +302,6 @@ async fn first_seen_has_no_drift_entry() {
     run_ingest(&store, &vault, &provider_arc(&p1), url, url).await;
 
     let log = read(&vault, "log.md");
-    assert!(log.contains("create |"), "create entries present: {log}");
-    assert!(!log.contains("drift |"), "no drift line on first ingest");
+    assert!(log.contains("* **create**:"), "create entries present: {log}");
+    assert!(!log.contains("**drift**"), "no drift line on first ingest");
 }

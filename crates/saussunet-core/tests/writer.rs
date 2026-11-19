@@ -117,7 +117,7 @@ async fn happy_path_writes_page_index_log_and_projection() {
 
     // log.md: create entry.
     let log = std::fs::read_to_string(vault.root().join("log.md")).unwrap();
-    assert!(log.contains("## [") && log.contains("create |"));
+    assert!(log.contains("* **create**:"));
     assert!(log.contains("- wrote concepts/walking-skeleton.md"));
 
     // page_registry: exactly one projection row, correct fields, NO body
@@ -313,13 +313,12 @@ async fn crafted_title_cannot_forge_log_entries() {
         .await
         .expect("write");
     let log = std::fs::read_to_string(vault.root().join("log.md")).unwrap();
-    let entries: Vec<&str> = log.lines().filter(|l| l.starts_with("## [")).collect();
+    let entries: Vec<&str> = log.lines().filter(|l| l.starts_with("* ")).collect();
     assert_eq!(entries.len(), 2, "init + create only, got {entries:?}");
-    assert!(entries[1].contains("create |"), "{}", entries[1]);
-    assert_eq!(
-        entries[1].matches("## [").count(),
-        1,
-        "only the real entry header may carry the `## [` shape: {}",
+    assert!(entries[1].contains("**create**"), "{}", entries[1]);
+    assert!(
+        !entries[1].contains("## [") && !entries[1].contains("## 2"),
+        "only real date groups/bullets may carry a heading shape: {}",
         entries[1]
     );
 }
@@ -355,7 +354,7 @@ async fn twenty_concurrent_writes_are_serialized_and_clean() {
     // index.md well-formed: 20 entries, counter 20.
     let index = std::fs::read_to_string(vault.root().join("index.md")).unwrap();
     assert_eq!(
-        count_needle(&index, "- [["),
+        count_needle(&index, "- ["),
         20,
         "index must have 20 entries"
     );
@@ -365,9 +364,9 @@ async fn twenty_concurrent_writes_are_serialized_and_clean() {
     );
 
     // log.md: 20 complete entries (plus the init entry), no interleaved
-    // fragments — every `## [` line matches the full entry shape.
+    // fragments — every `* ` bullet line matches the entry shape.
     let log = std::fs::read_to_string(vault.root().join("log.md")).unwrap();
-    let entry_lines: Vec<&str> = log.lines().filter(|l| l.starts_with("## [")).collect();
+    let entry_lines: Vec<&str> = log.lines().filter(|l| l.starts_with("* ")).collect();
     assert_eq!(entry_lines.len(), 21, "init + 20 entries");
     for line in &entry_lines {
         assert!(regex_shape_ok(line), "malformed log entry line: {line:?}");
@@ -383,15 +382,7 @@ async fn twenty_concurrent_writes_are_serialized_and_clean() {
     assert_eq!(count_temps(vault.root()), 0, "no .tmp-* leftovers");
 }
 
-/// `## [YYYY-MM-DD] action | subject` shape check (no regex dep).
+/// `* **action**: subject` bullet shape check (no regex dep).
 fn regex_shape_ok(line: &str) -> bool {
-    // "## [" + 10 date chars + "] " + action + " | " + subject
-    let rest = &line[4..];
-    let bytes: Vec<char> = rest.chars().collect();
-    bytes.len() > 12
-        && bytes[4] == '-'
-        && bytes[7] == '-'
-        && bytes[10] == ']'
-        && bytes[11] == ' '
-        && line.contains(" | ")
+    line.starts_with("* **") && line.contains("**: ")
 }

@@ -496,6 +496,38 @@ mod reserved_tests {
     }
 }
 
+/// True when `s` is exactly `YYYY-MM-DD` (okflint DATE_OK, regex-free).
+pub fn log_date_ok(s: &str) -> bool {
+    let r: Vec<char> = s.chars().collect();
+    r.len() == 10
+        && r[4] == '-'
+        && r[7] == '-'
+        && r.iter()
+            .enumerate()
+            .all(|(i, c)| if *c == '-' { i == 4 || i == 7 } else { c.is_ascii_digit() })
+}
+
+/// okflint E4 (okflint.py:88-94, LOG_HEADING + DATE_OK): every `## ` heading
+/// in a log.md body must be exactly a `## YYYY-MM-DD` date-group heading.
+pub fn check_log(body: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    for line in body.lines() {
+        let Some(rest) = line.strip_prefix("## ") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest.is_empty() {
+            continue; // LOG_HEADING requires a non-space heading body
+        }
+        if !log_date_ok(rest) {
+            violations.push(format!(
+                "E4: log date heading must be '## YYYY-MM-DD', got '## {rest}'"
+            ));
+        }
+    }
+    violations
+}
+
 #[cfg(test)]
 mod log_heading_tests {
     use super::check_log;

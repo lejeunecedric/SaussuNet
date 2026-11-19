@@ -160,7 +160,7 @@ async fn human_edit_survives_regeneration() {
     let log = read(&vault, "log.md");
     assert!(
         log.lines()
-            .any(|l| l.starts_with("## [") && l.contains("conflict |")),
+            .any(|l| l.starts_with("* ") && l.contains("**conflict**")),
         "{log}"
     );
     assert!(log.contains("- skipped write to concepts/gen-test.md (human edit detected)"));
@@ -255,7 +255,7 @@ async fn protected_page_refuses_all_writes() {
     let log = read(&vault, "log.md");
     assert!(
         log.lines()
-            .any(|l| l.starts_with("## [") && l.contains("refused |")),
+            .any(|l| l.starts_with("* ") && l.contains("**refuse**")),
         "{log}"
     );
     assert!(log.contains("(protected page)"));

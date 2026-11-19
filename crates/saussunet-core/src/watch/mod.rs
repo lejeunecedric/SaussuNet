@@ -263,8 +263,11 @@ async fn poll_inner(
     // per-file delta failed (H1): the applied deltas' lines are flushed
     // BEFORE the poll-level Err so they are never lost.
     if !lines.is_empty() {
-        let header = format!("## [{}] update | Watch", Utc::now().format("%Y-%m-%d"));
-        vault::log::append_entry(vault, &header, &lines).await?;
+        let details: Vec<String> = lines
+            .iter()
+            .map(|l| l.strip_prefix("- ").unwrap_or(l).to_string())
+            .collect();
+        vault::log::append_entry(vault, "update", "Watch", &details).await?;
     }
 
     if let Some(msg) = walk_err.or(file_err) {
@@ -486,8 +489,11 @@ async fn apply_sync_report(ctx: &DeltaCtx<'_>, report: &dav::SyncReport) -> Resu
     }
 
     if !lines.is_empty() {
-        let header = format!("## [{}] update | Watch", Utc::now().format("%Y-%m-%d"));
-        vault::log::append_entry(vault, &header, &lines).await?;
+        let details: Vec<String> = lines
+            .iter()
+            .map(|l| l.strip_prefix("- ").unwrap_or(l).to_string())
+            .collect();
+        vault::log::append_entry(vault, "update", "Watch", &details).await?;
     }
     // H1: flush the applied deltas' lines first, THEN surface the failure —
     // try_sync_poll's `?` keeps the token frozen so the failed file replays.

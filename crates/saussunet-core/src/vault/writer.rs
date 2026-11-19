@@ -28,11 +28,31 @@ pub enum WriteOutcome {
 
 /// Sanitize a title/path before it lands in log.md / index.md: newlines and
 /// `## [` sequences must not let a crafted title forge log entries (T-02-05).
-/// Newlines become spaces (a title can no longer start a new line), and the
+/// Newlines become spaces (a title can no longer start a new line), the
 /// `## [` sequence is collapsed to `##[` so whole-file scanners cannot match
-/// a forged entry shape inside a subject.
+/// a forged entry shape inside a subject, and `## ` followed by an ASCII
+/// digit is collapsed to `##<digit>` so a title cannot forge a `## YYYY-MM-DD`
+/// log date group (Pitfall 8).
 pub(crate) fn sanitize_for_nav(s: &str) -> String {
-    s.replace(['\r', '\n'], " ").replace("## [", "##[")
+    let s = s.replace(['\r', '\n'], " ").replace("## [", "##[");
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if i + 3 < chars.len()
+            && chars[i] == '#'
+            && chars[i + 1] == '#'
+            && chars[i + 2] == ' '
+            && chars[i + 3].is_ascii_digit()
+        {
+            out.push_str("##");
+            i += 3;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Map a page's directory (first path segment) to its index.md section
@@ -153,13 +173,11 @@ pub async fn write_page(
                 .await?;
             log::append_entry(
                 vault,
-                &format!(
-                    "## [{today}] refused | {} (protected page)",
-                    sanitize_for_nav(&existing_title)
-                ),
+                "refuse",
+                &existing_title,
                 &[
-                    format!("- refused write to {rel_path} (protected page)"),
-                    format!("- proposal recorded (pending_proposals #{id})"),
+                    format!("refused write to {rel_path} (protected page)"),
+                    format!("proposal recorded (pending_proposals #{id})"),
                 ],
             )
             .await?;
@@ -182,13 +200,11 @@ pub async fn write_page(
                         .await?;
                     log::append_entry(
                         vault,
-                        &format!(
-                            "## [{today}] conflict | {}",
-                            sanitize_for_nav(&existing_title)
-                        ),
+                        "conflict",
+                        &existing_title,
                         &[
-                            format!("- skipped write to {rel_path} (human edit detected)"),
-                            format!("- proposal recorded (pending_proposals #{id})"),
+                            format!("skipped write to {rel_path} (human edit detected)"),
+                            format!("proposal recorded (pending_proposals #{id})"),
                         ],
                     )
                     .await?;
@@ -212,13 +228,11 @@ pub async fn write_page(
                         .await?;
                     log::append_entry(
                         vault,
-                        &format!(
-                            "## [{today}] refused | {} (human-owned page)",
-                            sanitize_for_nav(&existing_title)
-                        ),
+                        "refuse",
+                        &existing_title,
                         &[
-                            format!("- refused write to {rel_path} (human-owned page)"),
-                            format!("- proposal recorded (pending_proposals #{id})"),
+                            format!("refused write to {rel_path} (human-owned page)"),
+                            format!("proposal recorded (pending_proposals #{id})"),
                         ],
                     )
                     .await?;
@@ -290,8 +304,9 @@ pub async fn write_page(
     let action = if is_update { "update" } else { "create" };
     log::append_entry(
         vault,
-        &format!("## [{today}] {action} | {}", sanitize_for_nav(&fm.title)),
-        &[format!("- wrote {rel_path}")],
+        action,
+        &fm.title,
+        &[format!("wrote {rel_path}")],
     )
     .await?;
 

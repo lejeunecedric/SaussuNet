@@ -219,7 +219,7 @@ async fn init_fs_creates_expected_tree_and_seeds() {
     let index = std::fs::read_to_string(root.join("index.md")).unwrap();
     assert!(index.contains("Total pages: 0"));
     let log = std::fs::read_to_string(root.join("log.md")).unwrap();
-    assert!(log.contains("## ["));
+    assert!(log.contains("* **create**:"));
     assert!(log.contains("Wiki initialized"));
 }
 

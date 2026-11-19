@@ -384,7 +384,7 @@ async fn sc2_unchanged_noop_changed_drift() {
     .await;
     let log = read(&vault, "log.md");
     assert!(
-        log.contains(&format!("## [{}] drift |", today())),
+        log.contains("* **drift**:"),
         "drift entry present: {log}"
     );
     assert!(
