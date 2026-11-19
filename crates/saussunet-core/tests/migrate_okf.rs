@@ -778,8 +778,16 @@ async fn migrated_bundle_accepts_writes() {
          tags: [ai]\nsources: [{src}]\n---\n\n\
          Fresh synthesizes the source. ^[{src}] See [[alpha]] and [[beta]].\n"
     );
-    saussunet_core::vault::writer::write_generated_page(&vault, &store, "concepts/fresh.md", &content)
-        .await
-        .expect("post-migration write_generated_page must succeed");
-    assert!(root.join("concepts/fresh.md").exists(), "page must be on disk");
+    saussunet_core::vault::writer::write_generated_page(
+        &vault,
+        &store,
+        "concepts/fresh.md",
+        &content,
+    )
+    .await
+    .expect("post-migration write_generated_page must succeed");
+    assert!(
+        root.join("concepts/fresh.md").exists(),
+        "page must be on disk"
+    );
 }
