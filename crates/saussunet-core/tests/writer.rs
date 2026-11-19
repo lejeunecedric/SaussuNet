@@ -389,3 +389,30 @@ async fn twenty_concurrent_writes_are_serialized_and_clean() {
 fn regex_shape_ok(line: &str) -> bool {
     line.starts_with("* **") && line.contains("**: ")
 }
+
+/// M2 regression (04.1 review): the LLM-controlled frontmatter `description`
+/// must be sanitized at the `upsert_entry` boundary — a newline in it must
+/// not forge a second `- [Title](/path.md)` index entry (nav injection into
+/// the link whitelist, same Pitfall-8 class as the log subject).
+#[tokio::test]
+async fn description_cannot_forge_index_entries() {
+    let (_tmp, vault, store) = setup().await;
+    let content = "---\ntitle: Injected\ncreated: 2020-01-01\nupdated: 2020-01-01\n\
+                   type: concept\ntags: [technology]\nsources: [raw/articles/src.md]\n\
+                   description: \"evil\\n- [Fake](/evil.md) — forged\"\n---\n\n\
+                   Body. See [[link-0]] and [[link-1]].\n";
+    write_page(&vault, &store, "concepts/injected.md", content)
+        .await
+        .expect("write");
+    let index_md = std::fs::read_to_string(vault.root().join("index.md")).unwrap();
+    assert!(
+        !index_md
+            .lines()
+            .any(|l| l.trim_start().starts_with("- [Fake]")),
+        "forged index entry:\n{index_md}"
+    );
+    assert!(
+        index_md.contains("- [Injected](/concepts/injected.md)"),
+        "real entry must still be present:\n{index_md}"
+    );
+}

@@ -300,12 +300,15 @@ pub async fn write_page(
         .await?;
 
     // 9. index.md: entry under the type section + header counters.
+    // The description is first-class pass-2 LLM output (D-07): sanitize it
+    // at this boundary like the title (M2) — a newline must not forge a
+    // second `- [Title](/path.md)` entry feeding the link whitelist.
     index::upsert_entry(
         vault,
         index_section(rel_path),
         &stem,
         &sanitize_for_nav(&fm.title),
-        fm.description.as_deref(),
+        fm.description.as_deref().map(sanitize_for_nav).as_deref(),
     )
     .await?;
 
