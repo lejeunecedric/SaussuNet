@@ -187,7 +187,10 @@ mod tests {
             ..Default::default()
         };
         let p = pass2_prompt(&page, "raw/x.md", "EV", &cand);
-        assert!(p.contains("\"description\""), "D-07: description instruction");
+        assert!(
+            p.contains("\"description\""),
+            "D-07: description instruction"
+        );
         assert!(p.contains("Person"), "D-03: subtype vocabulary wording");
         assert!(
             p.contains("[[wikilinks]]"),

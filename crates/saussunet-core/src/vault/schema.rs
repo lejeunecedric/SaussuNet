@@ -260,10 +260,7 @@ mod tests {
         // D-03: the entity subtype vocabulary is declared in SCHEMA.md.
         assert!(s.contains("## Entity Subtypes"));
         for sub in ["Person", "Organization", "Tool", "Place", "Event", "Work"] {
-            assert!(
-                s.contains(sub),
-                "subtype vocabulary must declare {sub}"
-            );
+            assert!(s.contains(sub), "subtype vocabulary must declare {sub}");
         }
         // D-15: raw records are typed Source concepts.
         assert!(s.contains("type: Source"));

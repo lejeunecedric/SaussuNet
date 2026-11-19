@@ -222,7 +222,10 @@ async fn entity_subtype_unknown_folds_to_entity() {
     run_ingest(&store, &vault, &provider_arc(&provider), url, url).await;
 
     let fm = disk_fm(&vault, "entities/ada-lovelace.md");
-    assert_eq!(fm.page_type, "Entity", "unknown subtype must fold to Entity");
+    assert_eq!(
+        fm.page_type, "Entity",
+        "unknown subtype must fold to Entity"
+    );
     assert_eq!(
         registry_page_type(&store, vault_id, "Ada Lovelace").await,
         Some("Entity".to_string()),
@@ -261,5 +264,8 @@ fn check_page_accepts_subtype_only_when_declared() {
     let mut vocab: Vec<&str> = okf::DEFAULT_TYPE_VOCAB.to_vec();
     vocab.push("Person");
     let v_union = okf::check_page(yaml, "body", &vocab);
-    assert!(v_union.is_empty(), "declared subtype must pass: {v_union:?}");
+    assert!(
+        v_union.is_empty(),
+        "declared subtype must pass: {v_union:?}"
+    );
 }
