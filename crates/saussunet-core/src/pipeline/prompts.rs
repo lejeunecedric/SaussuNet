@@ -172,6 +172,26 @@ mod tests {
     }
 
     #[test]
+    fn pass2_prompt_requires_description_and_subtype() {
+        let page = ExistingPage {
+            rel_path: "entities/ada.md".into(),
+            content: String::new(),
+        };
+        let cand = Candidate {
+            name: "Ada".into(),
+            kind: CandidateKind::Entity,
+            ..Default::default()
+        };
+        let p = pass2_prompt(&page, "raw/x.md", "EV", &cand);
+        assert!(p.contains("\"description\""), "D-07: description instruction");
+        assert!(p.contains("Person"), "D-03: subtype vocabulary wording");
+        assert!(
+            p.contains("[[wikilinks]]"),
+            "unchanged LLM contract: wikilink floor instruction"
+        );
+    }
+
+    #[test]
     fn pass2_prompt_marks_new_page_explicitly() {
         let page = ExistingPage {
             rel_path: "concepts/foo.md".into(),

@@ -176,6 +176,23 @@ mod tests {
     }
 
     #[test]
+    fn page_content_requires_description_in_hint() {
+        let hint = PageContent::json_schema_hint();
+        assert!(
+            hint.get("description").is_some(),
+            "D-07: hint must show the description field: {hint}"
+        );
+        let parsed: PageContent = serde_json::from_str(
+            r#"{"title": "React", "page_type": "Tool", "description": "A UI library."}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.description, "A UI library.");
+        // Absent description → default empty (the fallback lives in the rebuild).
+        let blank: PageContent = serde_json::from_str("{}").unwrap();
+        assert!(blank.description.is_empty());
+    }
+
+    #[test]
     fn schema_hints_are_objects() {
         assert!(ExtractCandidates::json_schema_hint()
             .get("candidates")
