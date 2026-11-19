@@ -48,11 +48,57 @@ pub fn parse_tag_taxonomy(vault: &Vault) -> Result<Vec<String>> {
     Ok(tags)
 }
 
+/// Parse the entity subtype vocabulary (D-03) from the vault's SCHEMA.md:
+/// bullet lines under `## Entity Subtypes` — a comma list
+/// (`- Person, Organization, ...`) or one subtype per bullet. Same
+/// fail-loud posture as [`parse_tag_taxonomy`]: a vault whose SCHEMA.md lost
+/// its subtype declaration would silently accept any `type` — refuse instead.
+pub fn parse_entity_subtypes(vault: &Vault) -> Result<Vec<String>> {
+    let path = vault.root().join("SCHEMA.md");
+    let content = std::fs::read_to_string(&path).map_err(|e| CoreError::Io {
+        path: path.clone(),
+        source: e,
+    })?;
+    let mut subtypes = Vec::new();
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            in_section = trimmed == "## Entity Subtypes";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(bullet) = trimmed.strip_prefix("- ") {
+            // `- Person, Organization, ...` — every comma item is a subtype.
+            for item in bullet.split(',') {
+                let item = item.trim();
+                if !item.is_empty() {
+                    subtypes.push(item.to_string());
+                }
+            }
+        }
+    }
+    if subtypes.is_empty() {
+        return Err(CoreError::Vault(format!(
+            "no entity subtypes found under '## Entity Subtypes' in {} — fix SCHEMA.md",
+            path.display()
+        )));
+    }
+    Ok(subtypes)
+}
+
 /// Build the SCHEMA.md seed for a vault whose Domain is `domain` (the vault
 /// name from config).
 pub fn seed(domain: &str) -> String {
     format!(
-        r#"# Wiki Schema
+        r#"---
+type: Schema
+title: Wiki Schema
+---
+
+# Wiki Schema
 
 ## Domain
 {domain}
@@ -60,7 +106,8 @@ pub fn seed(domain: &str) -> String {
 ## Conventions
 - File names: lowercase, hyphens, no spaces (e.g., `transformer-architecture.md`)
 - Every wiki page starts with YAML frontmatter (see below)
-- Use `[[wikilinks]]` to link between pages (minimum 2 outbound links per page)
+- Link between pages with markdown links `[Title](/path.md)` (minimum 2 outbound links
+  per page, root-relative paths); source citations use footnote markers (see Provenance)
 - When updating a page, always bump the `updated` date
 - Every new page must be added to `index.md` under the correct section
 - Every action must be appended to `log.md`
@@ -77,13 +124,22 @@ pub fn seed(domain: &str) -> String {
 ## Frontmatter
 ```yaml
 ---
+type: Concept | Comparison | Query | Source | Schema | Readme   # entities/ pages use one subtype from Entity Subtypes below (unknown folds to Entity)
 title: Page Title
+description: One-line summary of what this page covers
+tags: [from Tag Taxonomy below]
+timestamp: YYYY-MM-DDTHH:MM:SS+00:00   # ISO 8601 with explicit offset
+generated:
+  by: process:saussunet/<version>      # the process that wrote this page
+  at: YYYY-MM-DDTHH:MM:SS+00:00
+sources:
+  - id: source-name
+    resource: raw/articles/source-name.md
+    title: Source Title
+    last_modified: YYYY-MM-DDTHH:MM:SS+00:00
+# Extension keys (writer-managed or optional):
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
-type: entity | concept | comparison | query | summary
-tags: [from Tag Taxonomy below]
-sources: [raw/articles/source-name.md]
-# Optional quality signals:
 confidence: high | medium | low        # how well-supported the claims are
 contested: true                        # set when the page has unresolved contradictions
 contradictions: [other-page-slug]      # pages this one conflicts with
@@ -94,12 +150,21 @@ contradictions: [other-page-slug]      # pages this one conflicts with
 topics. Lint surfaces `contested: true` and `confidence: low` pages for review so weak claims
 don't silently harden into accepted wiki fact.
 
+Trust fields (`verified`, `status`, `stale_after`) are **never emitted without evidence** —
+do not add them to a page by hand.
+
 ### raw/ Frontmatter
 
 Raw sources ALSO get a small frontmatter block so re-ingests can detect drift:
 
 ```yaml
 ---
+type: Source
+title: Source Title
+timestamp: YYYY-MM-DDTHH:MM:SS+00:00
+generated:
+  by: process:saussunet/<version>
+  at: YYYY-MM-DDTHH:MM:SS+00:00
 source_url: https://example.com/article   # original URL, if applicable
 ingested: YYYY-MM-DD
 sha256: <hex digest of the raw content below the frontmatter>
@@ -118,6 +183,12 @@ this rule prevents tag sprawl.
 - Topics: technology, science, health, finance, history, product, event
 - Meta: comparison, timeline, reference, process
 
+## Entity Subtypes
+Every `entities/` page declares exactly one of these as its `type`. A subtype
+outside this list folds to `Entity` — the fold is deterministic, never an error.
+
+- Person, Organization, Tool, Place, Event, Work
+
 ## Page Thresholds
 - **Create a page** when an entity/concept appears in 2+ sources OR is central to one source
 - **Add to existing page** when a source mentions something already covered
@@ -129,7 +200,7 @@ this rule prevents tag sprawl.
 One page per notable entity. Include:
 - Overview / what it is
 - Key facts and dates
-- Relationships to other entities ([[wikilinks]])
+- Relationships to other entities (markdown links)
 - Source references
 
 ## Concept Pages
@@ -137,7 +208,7 @@ One page per concept or topic. Include:
 - Definition / explanation
 - Current state of knowledge
 - Open questions or debates
-- Related concepts ([[wikilinks]])
+- Related concepts (markdown links)
 
 ## Comparison Pages
 Side-by-side analyses. Include:
