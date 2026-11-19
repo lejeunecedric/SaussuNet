@@ -1,0 +1,322 @@
+//! Plan 04.1-05 T11/T12/T13 — `migrate-okf`: in-place llm-wiki → OKF
+//! conversion with dry-run default, terminal refusals, and B3Wiki parity.
+//!
+//! T11 (`migrate_mini_bundle`) ports `B3Wiki/tests/test_to_okf.py::
+//! TestConvertEndToEnd::test_mini_bundle` with the D-12/D-17 expectation
+//! changes: footnotes instead of the `# Citations` heading, and the quoted
+//! `okf_version: "0.2"` index frontmatter.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use tempfile::TempDir;
+
+use saussunet_core::config::{FileConfig, RuntimeConfig};
+use saussunet_core::vault::{frontmatter, ghash, okf, Vault};
+use saussunet_core::{boot_open, migrate, Store};
+
+/// Boot a store+vault rooted at `tmp/data/vaults/1` (same harness shape as
+/// `tests/pipeline_thresholds.rs::setup_with_config`).
+async fn setup(tmp: &TempDir) -> (Store, Vault) {
+    let toml = format!(
+        "[storage]\ndata_dir = \"{}\"\n\n[vault]\nid = 1\nname = \"main\"\n",
+        tmp.path().display()
+    );
+    let cfg: FileConfig = toml::from_str(&toml).expect("config parses");
+    let rt: RuntimeConfig = cfg.resolve().expect("resolve");
+    let (store, vault) = boot_open(&rt).await.expect("boot");
+    (store, vault)
+}
+
+/// Write `rel` under `root`, creating parent dirs.
+fn write(root: &Path, rel: &str, text: &str) {
+    let p = root.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, text).unwrap();
+}
+
+/// Snapshot every file's (bytes, mtime) under `root` for zero-write proofs.
+fn snapshot(root: &Path) -> BTreeMap<PathBuf, (String, std::time::SystemTime)> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let meta = std::fs::metadata(&path).unwrap();
+            out.insert(
+                path.clone(),
+                (
+                    std::fs::read_to_string(&path).unwrap_or_default(),
+                    meta.modified().unwrap(),
+                ),
+            );
+        }
+    }
+    out
+}
+
+fn assert_unchanged(before: &BTreeMap<PathBuf, (String, std::time::SystemTime)>, root: &Path) {
+    let after = snapshot(root);
+    assert_eq!(before, &after, "dry-run/refusal must modify zero files");
+}
+
+/// Build the synthetic llm-wiki vault (port of TestConvertEndToEnd plus the
+/// T11 extras: 2 concepts + 1 entity, wikilinks + `^[raw/...]` markers,
+/// lowercase types, created/updated dates, old-format index + log, old
+/// SCHEMA.md, one protected page, one dirty-frontmatter page).
+fn build_fixture(root: &Path) {
+    write(
+        root,
+        "log.md",
+        "# Log\n\n> Format: `## [YYYY-MM-DD] action | subject`\n\n\
+         ## [2026-10-20] create | Wiki initialized\n- Domain: x\n",
+    );
+    write(
+        root,
+        "index.md",
+        "# Index\n\n- [[players/a|A]] — A page.\n- [[alpha]] — Alpha concept.\n",
+    );
+    write(
+        root,
+        "SCHEMA.md",
+        "# Schema\n\n## Tag Taxonomy\n- technology: ai, music\n",
+    );
+    write(
+        root,
+        "entities/players/a.md",
+        "---\ntitle: A\ntype: entity\ntags: [person]\nsources: [raw/articles/r.md]\n\
+         created: 2026-10-19\nupdated: 2026-10-19\n---\n\nSee [[r]] and [[alpha]]. \
+         Claim one.^[raw/articles/r.md]\n",
+    );
+    write(
+        root,
+        "concepts/alpha.md",
+        "---\ntitle: Alpha\ntype: concept\ntags: [tech]\ncreated: 2026-10-18\n\
+         updated: 2026-10-19\n---\n\nAlpha is a test concept.^[raw/articles/r.md] \
+         See [[beta]] and [[a]].\n",
+    );
+    // Dirty YAML title (Pitfall 6): strict parse fails, parse_lenient must rescue.
+    write(
+        root,
+        "concepts/beta.md",
+        "---\ntitle: \"Brother\" Jack McDuff\ntype: concept\ntags: [jazz]\n\
+         created: 2026-10-17\nupdated: 2026-10-18\n---\n\nBrother was a jazz organ \
+         trio album. See [[alpha]] and [[a]].\n",
+    );
+    write(
+        root,
+        "concepts/locked.md",
+        "---\ntitle: Locked\ntype: concept\nprotected: true\ncreated: 2026-10-17\n\
+         updated: 2026-10-17\n---\n\nHuman text with a [[alpha]] link.\n",
+    );
+    write(
+        root,
+        "raw/articles/r.md",
+        "---\nsource_url: https://x.org\ningested: 2026-10-19\nsha256: abc\n---\n\n\
+         # R source\n",
+    );
+}
+
+#[tokio::test]
+async fn migrate_mini_bundle() {
+    let tmp = TempDir::new().expect("tempdir");
+    let backup = TempDir::new().expect("backup dir");
+    let (store, vault) = setup(&tmp).await;
+    let root = vault.root().to_path_buf();
+    build_fixture(&root);
+
+    // Threat model: a symlink escaping the root is skipped and reported, never
+    // followed.
+    let outside = TempDir::new().expect("outside");
+    write(outside.path(), "secret.md", "---\ntype: Concept\ntitle: Outside\n---\n\nbody\n");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path().join("secret.md"), root.join("concepts/ghost.md"))
+        .expect("symlink");
+
+    // ---- (a) dry-run: report only, ZERO writes -----------------------------
+    let before = snapshot(&root);
+    let report = migrate::dry_run(&vault).await.expect("dry_run");
+    assert!(
+        !report.files_to_change.is_empty(),
+        "dry-run must list files to change: {report:?}"
+    );
+    assert!(!report.rule_counts.is_empty(), "per-rule counts must be populated");
+    assert!(
+        matches!(report.verdict, migrate::Verdict::WouldConvert),
+        "verdict: {:?}",
+        report.verdict
+    );
+    assert_unchanged(&before, &root);
+    let rels: Vec<&str> = report.files_to_change.iter().map(|f| f.rel.as_str()).collect();
+    for expected in [
+        "entities/players/a.md",
+        "concepts/alpha.md",
+        "concepts/beta.md",
+        "raw/articles/r.md",
+        "index.md",
+        "log.md",
+        "SCHEMA.md",
+    ] {
+        assert!(rels.contains(&expected), "missing {expected} in {rels:?}");
+    }
+    // (e) protected page skipped + reported; (i) symlink skipped + reported.
+    assert!(
+        report
+            .skipped_protected
+            .contains(&"concepts/locked.md".to_string()),
+        "protected page must be reported: {:?}",
+        report.skipped_protected
+    );
+    #[cfg(unix)]
+    assert!(
+        report
+            .skipped_symlinks
+            .contains(&"concepts/ghost.md".to_string()),
+        "escaping symlink must be reported: {:?}",
+        report.skipped_symlinks
+    );
+    // (h) report JSON hygiene: relative paths + rule ids only — no absolute
+    // paths, no body text.
+    let json = serde_json::to_string(&report).expect("report serializes");
+    assert!(
+        !json.contains(&root.display().to_string()) && !json.contains(&tmp.path().display().to_string()),
+        "report JSON leaked an absolute path: {json}"
+    );
+    assert!(
+        !json.contains("R source") && !json.contains("Human text"),
+        "report JSON leaked page body text: {json}"
+    );
+
+    // ---- (b) apply: convert in place ---------------------------------------
+    let report = migrate::apply(&vault, &store, Some(backup.path()))
+        .await
+        .expect("apply");
+    assert!(
+        matches!(report.verdict, migrate::Verdict::Clean | migrate::Verdict::WouldConvert),
+        "apply verdict: {:?}",
+        report.verdict
+    );
+
+    let page_a = std::fs::read_to_string(root.join("entities/players/a.md")).unwrap();
+    let (a_yaml, a_body) = frontmatter::split(&page_a);
+    assert!(a_yaml.contains("type: Entity"), "capitalized type: {a_yaml}");
+    assert!(a_yaml.contains("description:"), "D-06 description: {a_yaml}");
+    assert!(
+        a_yaml.contains("timestamp: '2026-10-19T00:00:00Z'")
+            || a_yaml.contains("timestamp: \"2026-10-19T00:00:00Z\"")
+            || a_yaml.contains("timestamp: 2026-10-19T00:00:00Z"),
+        "timestamp ← updated (date → T00:00:00Z): {a_yaml}"
+    );
+    assert!(a_yaml.contains("generated:"), "generated block: {a_yaml}");
+    assert!(
+        a_yaml.contains("process:saussunet/"),
+        "actor: {a_yaml}"
+    );
+    assert!(!page_a.contains("[["), "zero wikilinks on disk: {page_a}");
+    assert!(
+        page_a.contains("[R source](/raw/articles/r.md)") || page_a.contains("[r](/raw/articles/r.md)")
+            || page_a.contains("[r source](/raw/articles/r.md)"),
+        "wikilink to raw resolved: {page_a}"
+    );
+    assert!(a_body.contains("[^r]"), "footnote marker keyed to sources[].id: {a_body}");
+    assert!(a_body.contains("[^r]:"), "footnote definition: {a_body}");
+    assert!(!page_a.contains("# Citations"), "no v0.1 citations heading: {page_a}");
+    assert!(
+        a_yaml.contains("resource: /raw/articles/r.md"),
+        "sources[] resource: {a_yaml}"
+    );
+    assert!(a_yaml.contains("id: r"), "sources[] id: {a_yaml}");
+
+    // raw page: type: Source, extension keys kept, body bytes untouched.
+    let raw_page = std::fs::read_to_string(root.join("raw/articles/r.md")).unwrap();
+    let (raw_yaml, raw_body) = frontmatter::split(&raw_page);
+    assert!(raw_yaml.contains("type: Source"), "raw is Source: {raw_yaml}");
+    assert!(raw_yaml.contains("source_url: https://x.org"), "{raw_yaml}");
+    assert!(raw_yaml.contains("sha256: abc"), "{raw_yaml}");
+    assert_eq!(raw_body, "\n# R source\n", "raw body byte-identical");
+
+    // dirty-YAML page rescued by parse_lenient (Pitfall 6).
+    let beta = std::fs::read_to_string(root.join("concepts/beta.md")).unwrap();
+    assert!(beta.contains("Brother"), "lenient title preserved: {beta}");
+    assert!(beta.contains("type: Concept"), "{beta}");
+
+    // index: okf_version frontmatter + new entry format + backfilled descriptions.
+    let index = std::fs::read_to_string(root.join("index.md")).unwrap();
+    assert!(
+        index.starts_with("---\nokf_version: \"0.2\"\n---"),
+        "index frontmatter: {index}"
+    );
+    assert!(
+        index.contains("- [A](/entities/players/a.md) — A page."),
+        "index entry + backfilled description: {index}"
+    );
+    assert!(
+        index.contains("- [Alpha](/concepts/alpha.md) — Alpha concept."),
+        "index entry + backfilled description: {index}"
+    );
+
+    // log: date-grouped newest-first, old `## [` shape gone.
+    let log = std::fs::read_to_string(root.join("log.md")).unwrap();
+    assert!(log.contains("## 2026-10-20"), "date group kept: {log}");
+    assert!(
+        log.contains("* **Create**: Wiki initialized"),
+        "bullet shape: {log}"
+    );
+    assert!(!log.contains("## ["), "old heading shape gone: {log}");
+
+    // SCHEMA.md typed Schema (Pitfall 5).
+    let schema = std::fs::read_to_string(root.join("SCHEMA.md")).unwrap();
+    assert!(schema.starts_with("---\ntype: Schema"), "SCHEMA typed: {schema}");
+
+    // ---- (c) full-bundle conformance: 0 errors ------------------------------
+    let errors = okf::check_bundle(&root);
+    assert!(errors.is_empty(), "check_bundle errors: {errors:?}");
+
+    // ---- (d) gen_hash re-seed over the FINAL bytes (Pitfall 2) --------------
+    for rel in [
+        "entities/players/a.md",
+        "concepts/alpha.md",
+        "concepts/beta.md",
+    ] {
+        let text = std::fs::read_to_string(root.join(rel)).unwrap();
+        let (yaml, body) = frontmatter::split(&text);
+        let fm = frontmatter::parse(yaml).unwrap();
+        let stored = fm.gen_hash.unwrap_or_else(|| panic!("{rel}: gen_hash missing"));
+        assert_eq!(
+            stored,
+            ghash::compute_map(yaml, body),
+            "{rel}: stored gen_hash must equal compute_map over final bytes"
+        );
+    }
+
+    // ---- (e) protected page byte-identical ----------------------------------
+    let locked = std::fs::read_to_string(root.join("concepts/locked.md")).unwrap();
+    assert!(
+        locked.contains("Human text with a [[alpha]] link."),
+        "protected page untouched: {locked}"
+    );
+    assert!(!locked.contains("generated:"), "protected page untouched: {locked}");
+
+    // ---- (f) reindex: SQLite matches the tree --------------------------------
+    let tree_pages = ["entities/players/a.md", "concepts/alpha.md", "concepts/beta.md", "concepts/locked.md"];
+    let rows = store.list_pages(vault.id).await.expect("list_pages");
+    let row_paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+    for rel in tree_pages {
+        assert!(row_paths.contains(&rel), "reindex missing {rel}: {row_paths:?}");
+    }
+    assert_eq!(rows.len(), tree_pages.len(), "reindex row count == tree pages");
+
+    // ---- (g) migration log entry under today's group -------------------------
+    let log = std::fs::read_to_string(root.join("log.md")).unwrap();
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    assert!(log.contains(&format!("## {today}")), "today's group: {log}");
+    assert!(log.contains("* **migrate-okf**:"), "migration entry: {log}");
+    // Newest-first: today's group sits above the 2026-10-20 group.
+    let today_pos = log.find(&format!("## {today}")).unwrap();
+    let old_pos = log.find("## 2026-10-20").unwrap();
+    assert!(today_pos < old_pos, "newest-first: {log}");
+}
