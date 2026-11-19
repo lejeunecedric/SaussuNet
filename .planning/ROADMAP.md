@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: LLM Provider + Durable Job Queue** - Abstract LlmProvider (mock + OpenAI-compatible), bounded worker pool, crash-safe SQLite job queue (completed 2026-10-26)
 - [x] **Phase 3: Extraction Pipeline** - Submit a web URL or PDF and get validated, deduplicated, provenance-carrying llm-wiki pages (completed 2026-10-30)
 - [x] **Phase 4: Continuous Source Watching** - WebDAV watched sources polled on an interval; the vault updates itself and survives restarts (completed 2026-11-02)
-- [ ] **Phase 04.1: OKF-Native Output** - The vault is an OKF v0.2-conformant bundle: writer emits OKF natively, `migrate-okf` converts existing vaults (INSERTED)
+- [x] **Phase 04.1: OKF-Native Output** - The vault is an OKF v0.2-conformant bundle: writer emits OKF natively, `migrate-okf` converts existing vaults (INSERTED) (completed 2026-11-19)
 - [ ] **Phase 5: Health Lint + Review & Monitoring UI** - Lint reports, review queue with diffs, pipeline monitoring, all config from the web UI
 - [ ] **Phase 6: Exposure + Deployment** - Read-only MCP endpoint, mdbook preview from the UI, deploy to our server with gitignored config
 
@@ -95,7 +95,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. `saussunet migrate-okf` converts an llm-wiki vault in place to a conformant bundle (B3Wiki fixture parity) and refuses an already-converted vault
 
 **Superseded contracts (planner note):** the Phase 1/3 "≥2 outbound wikilinks" floor and `[[wikilink]]` convention are superseded by OKF-02 bundle-relative markdown links; Phase 5 LINT-01 "broken wikilinks" must be read as "broken markdown links". Reference conversion + mapping decisions: B3Wiki repo branch `okf` (`scripts/to_okf.py`, `OKF-MAPPING.md`).
-**Plans:** 4/5 plans executed
+**Plans:** 5/5 plans complete
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 04.1 to break down)
