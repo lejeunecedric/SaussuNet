@@ -98,7 +98,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans:** 5/5 plans complete
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 04.1 to break down)
+- [x] TBD (run /gsd-plan-phase 04.1 to break down) (completed 2026-11-19)
 
 ### Phase 5: Health Lint + Review & Monitoring UI
 **Goal:** The human is the guardrail: lint runs after every batch, destructive changes wait in a review queue with diffs, and everything is configured and monitored from the web UI.

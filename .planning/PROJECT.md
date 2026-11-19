@@ -20,12 +20,12 @@ Feed raw sources (Drive, WebDAV, web, MCP) and get, **continuously**, an up-to-d
 - [x] Abstract LLM provider: local (Strix Halo / ROCm) or cloud API, interchangeable — Validated in Phase 2 (`LlmProvider` trait + `MockProvider` + `OpenAiCompat`, live-proven against a real OpenAI-compatible endpoint; durable SQLite job queue with atomic claim/retry/reap)
 - [x] Ingestion pipeline: sources → extraction/linking → llm-wiki notes (SCHEMA, index, log, wikilinks, frontmatter) — Validated in Phase 3 (URL + PDF ingestion, sha256 no-op/drift, threshold gate, entity-registry dedup, provenance + contested flags, deterministic write-path validator; 214 tests green, phase acceptance sc1–sc5)
 - [x] Continuous source watching: WebDAV watched sources polled on an interval, vault updates itself — Validated in Phase 4 (hand-rolled PROPFIND Depth:1 BFS with depth cap, opportunistic RFC 6578 sync-token with fallback latch, watch_state persistence + restart-resume no re-scan, sha256-gated no-op polls, ingest_raw job kind; 266 core tests green; manual UAT against a real LAN WebDAV server pending)
+- [x] OKF v0.2 native output: writer emits conformant OKF (frontmatter, markdown links, citations), `saussunet migrate-okf` for existing vaults — Validated in Phase 04.1 (vault::okf §11 checker + §9 write-path gate, nested D-06 frontmatter, wikilink→markdown resolver, footnote citations keyed to sources[].id, date-grouped log, SCHEMA subtype vocab; migrate-okf dry-run/apply/verify with live B3Wiki parity; 326 tests, verifier 5/5)
 
 ### Active
 
 <!-- Starting hypotheses, validated by shipping. -->
 
-- [ ] OKF v0.2 native output: writer emits conformant OKF (frontmatter, markdown links, citations), `saussunet migrate-okf` for existing vaults — Phase 04.1 (inserted after Phase 4)
 - [ ] File sources: Google Drive (v2) — WebDAV watching shipped in Phase 4
 - [ ] Inbound MCP sources: the vault stores only **pointer notes** (access-point address), content read live via stream on demand
 - [ ] Outbound MCP exposure: the vault served over MCP for external agent reading
@@ -97,4 +97,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-11-18 — Phase 04.1 (OKF-Native Output) inserted: vault becomes an OKF v0.2-conformant bundle; OKF-01..07 requirements added; reference conversion B3Wiki branch `okf`*
+*Last updated: 2026-11-19 — Phase 04.1 (OKF-Native Output) complete: vault emits OKF v0.2 natively, migrate-okf shipped with B3Wiki parity; OKF-01..07 validated*

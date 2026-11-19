@@ -3,13 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: ready_to_plan
-last_updated: "2026-11-18T23:06:26.632Z"
+last_updated: 2026-11-19T01:59:51.880Z
 progress:
   total_phases: 7
   completed_phases: 4
   total_plans: 29
-  completed_plans: 24
+  completed_plans: 29
   percent: 57
+stopped_at: Phase 04.1 complete (5/5) — ready to discuss Phase 5
 ---
 
 # State: SaussuNet
@@ -46,6 +47,7 @@ Single-writer vault layer, atomic writes, `gen_hash` edit protection, and the mu
 | 2. LLM Provider + Durable Job Queue | Complete | — |
 | 3. Extraction Pipeline | Complete | 8 plans; 214+ tests; UAT 8/9 pass live; 3 live-UAT fixes (thinking-off, raw/ marker, wikilink floor) |
 | 4. Continuous Source Watching | Complete | 7 plans; 266 core tests; review H1/M1/M2 fixed TDD; verifier 5/5 (human UAT on real LAN WebDAV pending) |
+| 4.1 OKF-Native Output | Complete | 5 plans, 4 waves; 326 tests; vault emits OKF v0.2 natively (frontmatter, markdown links, footnote citations, §9 gate); migrate-okf with B3Wiki parity live; review H1/H2/M1/M2 fixed TDD; verifier 5/5 |
 | 5. Health Lint + Review & Monitoring UI | Not started | — |
 | 6. Exposure + Deployment | Not started | — |
 
