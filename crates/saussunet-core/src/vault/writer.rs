@@ -282,6 +282,7 @@ pub async fn write_page(
         index_section(rel_path),
         &stem,
         &sanitize_for_nav(&fm.title),
+        fm.description.as_deref(),
     )
     .await?;
 

@@ -437,6 +437,31 @@ async fn read_raw_meta(vault: &Vault, rel: &str) -> RawSourceMeta {
     }
 }
 
+/// okflint E3/W0 (okflint.py:74-87): reserved files (`index.md`, `log.md`)
+/// frontmatter rules. `fm_present` = a frontmatter block exists; `fm_keys` =
+/// its top-level keys (parsed by the caller — this stays pure). Root
+/// `index.md` may carry frontmatter with ONLY `okf_version` (D-17); extra
+/// keys are a W0 warning. `log.md` must carry NO frontmatter (E3).
+pub fn check_reserved(rel: &str, fm_present: bool, fm_keys: &[String]) -> Vec<String> {
+    if !fm_present {
+        return Vec::new();
+    }
+    match rel {
+        "log.md" => vec![format!("E3 {rel}: index/log.md must carry no frontmatter")],
+        "index.md" => {
+            let extra: Vec<&String> = fm_keys.iter().filter(|k| *k != "okf_version").collect();
+            if extra.is_empty() {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "W0 {rel}: root index frontmatter keys beyond okf_version: {extra:?}"
+                )]
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod reserved_tests {
     use super::check_reserved;

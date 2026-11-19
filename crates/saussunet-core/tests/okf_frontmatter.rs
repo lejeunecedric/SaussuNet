@@ -79,10 +79,10 @@ async fn setup_with_config(
     let rt: RuntimeConfig = cfg.resolve().expect("resolve");
     let (store, vault) = boot_open(&rt).await.expect("boot");
     // PIPE-06 whitelist: pass-2 fixtures link to these via index.md stems.
-    saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "Meta", "Meta")
+    saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "Meta", "Meta", None)
         .await
         .expect("index Meta");
-    saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "JavaScript", "JavaScript")
+    saussunet_core::vault::index::upsert_entry(&vault, "Concepts", "JavaScript", "JavaScript", None)
         .await
         .expect("index JavaScript");
     (tmp, vault.id, Arc::new(store), Arc::new(vault), rt)

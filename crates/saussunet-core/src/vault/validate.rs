@@ -10,7 +10,7 @@
 //! not by prompt: a `sources` entry inside the wiki layer is rejected, and
 //! every `^[...]` provenance marker must target a real file under `raw/`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::error::{CoreError, Result};
@@ -22,24 +22,53 @@ use super::{frontmatter, schema, Vault};
 /// segment is one of these is the LLM citing its own output (Pitfall 4).
 const WIKI_DIRS: [&str; 4] = ["entities", "concepts", "comparisons", "queries"];
 
+/// Parse `- [Title](/path.md) — description` index entries (D-18) into a
+/// stem → path map. The stem is recovered from the path's `file_stem`
+/// (`/concepts/foo.md` → `foo`) because the whitelist is stem-keyed.
+/// Paths must be bundle-relative (`/dir/file.md`, no `..` component) —
+/// anything else is skipped and never reaches the whitelist (path-traversal
+/// guard). Paired with `index::upsert_entry` (Pitfall 1: both sides flip in
+/// one commit; plan 04.1-03's resolver consumes the stem→path mapping).
+pub fn index_entry_map(content: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in content.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("- [") else {
+            continue;
+        };
+        let Some(close) = rest.find("](") else {
+            continue;
+        };
+        let after = &rest[close + 2..];
+        let Some(end) = after.find(')') else {
+            continue;
+        };
+        let path = after[..end].trim();
+        if !path.starts_with('/') || !path.ends_with(".md") || path.contains("..") {
+            continue;
+        }
+        let stem = match Path::new(path).file_stem() {
+            Some(s) => s.to_string_lossy().to_string(),
+            None => continue,
+        };
+        if !stem.is_empty() {
+            map.insert(stem, path.to_string());
+        }
+    }
+    map
+}
+
 /// Whitelist of legal outbound wikilink targets (D-11/PIPE-06): stems parsed
-/// from `index.md` entries (`- [[stem]] — title`, written by
-/// [`super::index::upsert_entry`]) ∪ entity canonical names ∪ registry
-/// `page_path` stems. Built deterministically at validation time.
+/// from `index.md` entries (`- [Title](/path.md) — desc`, written by
+/// [`super::index::upsert_entry`] and read by [`index_entry_map`]) ∪ entity
+/// canonical names ∪ registry `page_path` stems. Built deterministically at
+/// validation time.
 pub async fn link_whitelist(vault: &Vault, store: &Store) -> Result<HashSet<String>> {
     let mut set = HashSet::new();
 
     let index_path = vault.root().join("index.md");
     if let Ok(content) = tokio::fs::read_to_string(&index_path).await {
-        for line in content.lines() {
-            if let Some(rest) = line.trim_start().strip_prefix("- [[") {
-                if let Some(end) = rest.find("]]") {
-                    let stem = rest[..end].trim();
-                    if !stem.is_empty() {
-                        set.insert(stem.to_string());
-                    }
-                }
-            }
+        for stem in index_entry_map(&content).into_keys() {
+            set.insert(stem);
         }
     }
 

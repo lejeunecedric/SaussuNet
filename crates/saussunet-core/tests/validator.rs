@@ -29,10 +29,10 @@ async fn setup() -> (TempDir, i64, Arc<Store>, Arc<Vault>) {
     std::fs::create_dir_all(vault.root().join("raw")).expect("raw dir");
     std::fs::write(vault.root().join("raw/src.md"), "# source\n").expect("raw file");
     // Two pre-existing wiki pages, discoverable via index.md stems.
-    index::upsert_entry(&vault, "Concepts", "Meta", "Meta")
+    index::upsert_entry(&vault, "Concepts", "Meta", "Meta", None)
         .await
         .expect("index Meta");
-    index::upsert_entry(&vault, "Concepts", "JavaScript", "JavaScript")
+    index::upsert_entry(&vault, "Concepts", "JavaScript", "JavaScript", None)
         .await
         .expect("index JavaScript");
     (tmp, vault.id, Arc::new(store), Arc::new(vault))
