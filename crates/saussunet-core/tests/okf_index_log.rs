@@ -12,8 +12,9 @@ use tempfile::TempDir;
 
 use saussunet_core::config::{FileConfig, RuntimeConfig};
 use saussunet_core::vault::index;
+use saussunet_core::vault::okf;
 use saussunet_core::vault::validate::{index_entry_map, link_whitelist};
-use saussunet_core::vault::Vault;
+use saussunet_core::vault::{log, Vault};
 use saussunet_core::{boot_open, Store};
 
 async fn setup() -> (TempDir, Arc<Store>, Arc<Vault>) {
@@ -106,3 +107,120 @@ async fn index_okf() {
     assert!(!wl.contains("etc"), "traversal path must be skipped: {wl:?}");
 }
 
+// ---------------------------------------------------------------------------
+// T7 — log.md date groups (D-19)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn log_date_groups() {
+    let (_tmp, _store, vault) = setup().await;
+
+    // Seed: no frontmatter, today's date group, bullet entry.
+    let seeded = std::fs::read_to_string(vault.root().join("log.md")).unwrap();
+    assert!(!seeded.starts_with("---"), "log.md carries no frontmatter");
+    assert!(seeded.contains(&format!("## {}\n", today())));
+    assert!(seeded.contains("* **create**: Wiki initialized"));
+    assert!(seeded.contains("  - Domain: main"));
+
+    // Append with details → main bullet + indented sub-bullets, newest-first
+    // inside today's group (inserted at the top, above the seed entry).
+    log::append_entry(
+        &vault,
+        "ingest",
+        "Foo source",
+        &["wrote concepts/foo.md".to_string()],
+    )
+    .await
+    .expect("append ingest");
+    let log_md = std::fs::read_to_string(vault.root().join("log.md")).unwrap();
+    assert!(log_md.contains("* **ingest**: Foo source"));
+    assert!(log_md.contains("  - wrote concepts/foo.md"));
+    let ing = log_md.find("**ingest**").unwrap();
+    let cr = log_md.find("**create**").unwrap();
+    assert!(ing < cr, "new entries insert at the top of the group");
+    assert_eq!(
+        okf::check_log(&log_md),
+        Vec::<String>::new(),
+        "seeded + appended log must be E4-clean"
+    );
+
+    // Entry with no details: bullet only.
+    log::append_entry(&vault, "lint", "Clean", &[])
+        .await
+        .expect("append lint");
+    let log_md = std::fs::read_to_string(vault.root().join("log.md")).unwrap();
+    assert!(log_md.contains("* **lint**: Clean\n"));
+
+    // Second-day entry creates a NEW group ABOVE the older one.
+    let older = format!(
+        "# Wiki Log\n\n> header\n\n## 2020-01-01\n* **create**: Old day\n\n\
+         ## 2019-12-31\n* **create**: Older day\n"
+    );
+    std::fs::write(vault.root().join("log.md"), older).unwrap();
+    log::append_entry(&vault, "update", "New day", &[])
+        .await
+        .expect("append new day");
+    let log_md = std::fs::read_to_string(vault.root().join("log.md")).unwrap();
+    let new_pos = log_md.find(&format!("## {}\n", today())).unwrap();
+    let old_pos = log_md.find("## 2020-01-01").unwrap();
+    let older_pos = log_md.find("## 2019-12-31").unwrap();
+    assert!(
+        new_pos < old_pos && old_pos < older_pos,
+        "groups newest-first:\n{log_md}"
+    );
+    assert!(log_md.contains("# Wiki Log"), "header preserved");
+
+    // entry_count counts `* ` main bullets only (not sub-bullets).
+    let fixture = format!(
+        "# Wiki Log\n\n> header\n\n## 2026-10-01\n{}",
+        (0..501)
+            .map(|i| format!("* **update**: Page {i}\n  - touched page-{i}.md\n"))
+            .collect::<String>()
+    );
+    assert_eq!(log::entry_count(&fixture), 501);
+    assert!(log::should_rotate(&fixture));
+    let fixture_500 = fixture.replacen("* **update**: Page 500\n", "", 1);
+    assert_eq!(log::entry_count(&fixture_500), 500);
+    assert!(!log::should_rotate(&fixture_500));
+    let fresh = log::fresh_header(&fixture);
+    assert!(fresh.contains("# Wiki Log"));
+    assert!(!fresh.contains("## 2026-10-01"));
+
+    // Rotation through append_entry: 501 bullets → archive + fresh log.
+    std::fs::write(vault.root().join("log.md"), &fixture).unwrap();
+    log::append_entry(&vault, "create", "Fresh", &["wrote fresh.md".to_string()])
+        .await
+        .expect("append rotates");
+    let year = chrono::Utc::now().format("%Y").to_string();
+    let rotated = std::fs::read_to_string(vault.root().join(format!("log-{year}.md"))).unwrap();
+    assert_eq!(log::entry_count(&rotated), 501);
+    let fresh_log = std::fs::read_to_string(vault.root().join("log.md")).unwrap();
+    assert!(fresh_log.contains("# Wiki Log"));
+    assert_eq!(log::entry_count(&fresh_log), 1);
+    assert!(fresh_log.contains("* **create**: Fresh"));
+    assert!(fresh_log.contains(&format!("## {}\n", today())));
+}
+
+#[tokio::test]
+async fn log_injection_neutralized() {
+    // Pitfall 8: a subject/detail carrying a forged date heading or the old
+    // `## [` entry shape must render sanitized — no forged group/entry.
+    let (_tmp, _store, vault) = setup().await;
+    log::append_entry(
+        &vault,
+        "update",
+        "Evil ## 2026-01-01 delete ## [",
+        &["detail ## 2027-02-02 smuggled".to_string()],
+    )
+    .await
+    .expect("append");
+    let log_md = std::fs::read_to_string(vault.root().join("log.md")).unwrap();
+    assert!(
+        okf::check_log(&log_md).is_empty(),
+        "no forged date heading may survive: {log_md}"
+    );
+    assert!(!log_md.contains("## 2026-01-01"));
+    assert!(!log_md.contains("## 2027-02-02"));
+    assert!(!log_md.contains("## ["));
+    assert!(log_md.contains("##2026-01-01"), "collapsed, not dropped");
+}

@@ -495,3 +495,32 @@ mod reserved_tests {
         assert!(check_reserved("log.md", false, &[]).is_empty());
     }
 }
+
+#[cfg(test)]
+mod log_heading_tests {
+    use super::check_log;
+
+    #[test]
+    fn date_heading_is_clean() {
+        assert!(check_log("## 2026-11-18\n* **ingest**: x\n").is_empty());
+    }
+
+    #[test]
+    fn bracket_heading_is_e4() {
+        let v = check_log("## [2026-11-18] create | Wiki\n");
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].starts_with("E4"), "{v:?}");
+    }
+
+    #[test]
+    fn non_date_heading_is_e4() {
+        let v = check_log("## Notes\n");
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].starts_with("E4"), "{v:?}");
+    }
+
+    #[test]
+    fn trailing_text_after_date_is_e4() {
+        assert!(check_log("## 2026-11-18 extra").iter().any(|v| v.starts_with("E4")));
+    }
+}
