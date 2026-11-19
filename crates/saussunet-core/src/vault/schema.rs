@@ -171,6 +171,62 @@ mod tests {
         }
         assert!(s.contains("gen_hash"));
         assert!(s.contains("protected: true"));
+        // OKF-07: SCHEMA.md itself is typed (Pitfall 5 denominator).
+        assert!(
+            s.starts_with("---\ntype: Schema\n"),
+            "SCHEMA.md must carry type: Schema frontmatter"
+        );
+        // OKF-07: the frontmatter template shows the D-06 OKF shape.
+        for marker in ["description:", "timestamp:", "generated:", "sources:"] {
+            assert!(
+                s.contains(marker),
+                "frontmatter template must show {marker}"
+            );
+        }
+        for ty in ["Concept", "Entity", "Source", "Query"] {
+            assert!(s.contains(ty), "type vocabulary must mention {ty}");
+        }
+        // D-03: the entity subtype vocabulary is declared in SCHEMA.md.
+        assert!(s.contains("## Entity Subtypes"));
+        for sub in ["Person", "Organization", "Tool", "Place", "Event", "Work"] {
+            assert!(
+                s.contains(sub),
+                "subtype vocabulary must declare {sub}"
+            );
+        }
+        // D-15: raw records are typed Source concepts.
+        assert!(s.contains("type: Source"));
+        // Honesty rule: trust fields never appear without evidence.
+        assert!(s.contains("never emitted without evidence"));
+        // OKF link idiom replaces the wikilink instruction; the provenance
+        // marker instruction stays (unchanged LLM contract).
+        assert!(!s.contains("[[wikilinks]]"), "OKF seed uses markdown links");
+        assert!(s.contains("^[raw/"));
+    }
+
+    #[tokio::test]
+    async fn parse_entity_subtypes_reads_seeded_schema() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let vault = Vault::new(1, "main", tmp.path().to_path_buf());
+        vault.init_fs().await.unwrap();
+        let subs = parse_entity_subtypes(&vault).unwrap();
+        for t in ["Person", "Organization", "Tool", "Place", "Event", "Work"] {
+            assert!(subs.iter().any(|x| x == t), "missing {t} in {subs:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_entity_subtypes_fails_loudly_when_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        super::super::atomic::write_atomic(
+            &tmp.path().join("SCHEMA.md"),
+            b"# Wiki Schema\n\nno subtypes here\n",
+        )
+        .await
+        .unwrap();
+        let vault = Vault::new(1, "main", tmp.path().to_path_buf());
+        let err = parse_entity_subtypes(&vault).unwrap_err().to_string();
+        assert!(err.contains("no entity subtypes"), "{err}");
     }
 
     #[tokio::test]
