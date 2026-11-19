@@ -376,3 +376,304 @@ async fn migrate_mini_bundle() {
     let old_pos = log.find("## 2026-10-20").unwrap();
     assert!(today_pos < old_pos, "newest-first: {log}");
 }
+
+// ---------------------------------------------------------------------------
+// Task 2 — T12 refusals, --verify, undo-path decision matrix, T13 parity.
+// ---------------------------------------------------------------------------
+
+/// Minimal already-converted vault: root index carries `okf_version`.
+fn write_converted_index(root: &Path) {
+    write(
+        root,
+        "index.md",
+        "---\nokf_version: \"0.2\"\n---\n# Index\n\n- [X](/concepts/x.md) — X.\n",
+    );
+    write(
+        root,
+        "concepts/x.md",
+        "---\ntype: Concept\ntitle: X\ndescription: X page.\ntimestamp: '2026-10-20T00:00:00Z'\n\
+         generated:\n  by: process:b3wiki-agent\n  at: '2026-10-20T00:00:00Z'\n---\n\nX body.\n",
+    );
+}
+
+/// `n` pages, `gen` of them carrying a `generated:` block (threshold fixture).
+fn write_generated_pages(root: &Path, n: usize, gen: usize) {
+    for i in 1..=n {
+        let mut fm = format!("---\ntype: Concept\ntitle: P{i}\ncreated: 2026-10-01\n---\n\n");
+        if i <= gen {
+            fm.push_str("Body with generated marker.\n");
+            // append generated block into the frontmatter instead
+            fm = format!(
+                "---\ntype: Concept\ntitle: P{i}\ngenerated:\n  by: process:b3wiki-agent\n  \
+                 at: '2026-10-20T00:00:00Z'\n---\n\nBody {i}.\n"
+            );
+        } else {
+            fm.push_str(&format!("Body {i}.\n"));
+        }
+        write(root, &format!("concepts/p{i}.md"), &fm);
+    }
+}
+
+#[tokio::test]
+async fn migrate_refusals() {
+    // (a) root index carries okf_version → terminal refusal, zero writes.
+    let tmp = TempDir::new().expect("tempdir");
+    let (store, vault) = setup(&tmp).await;
+    let root = vault.root().to_path_buf();
+    write_converted_index(&root);
+    let before = snapshot(&root);
+    let report = migrate::dry_run(&vault).await.expect("dry_run");
+    let reason = report
+        .verdict
+        .reason()
+        .unwrap_or_else(|| panic!("expected refusal, got {:?}", report.verdict));
+    assert!(reason.contains("already_converted"), "{reason}");
+    assert_unchanged(&before, &root);
+    let report = migrate::apply(&vault, &store, None).await.expect("apply");
+    assert!(report.verdict.reason().is_some(), "apply must refuse too");
+    assert_unchanged(&before, &root);
+
+    // (b) ≥80% generated: threshold — 4/5 refuses, 3/5 proceeds.
+    let tmp4 = TempDir::new().expect("tempdir4");
+    let (_s4, v4) = setup(&tmp4).await;
+    write(
+        v4.root(),
+        "index.md",
+        "# Index\n\n- [[p1]] — one.\n- [[p2]] — two.\n",
+    );
+    write_generated_pages(v4.root(), 5, 4);
+    let before4 = snapshot(v4.root());
+    let report = migrate::dry_run(&v4).await.expect("dry_run 4/5");
+    let reason = report
+        .verdict
+        .reason()
+        .unwrap_or_else(|| panic!("4/5 generated must refuse, got {:?}", report.verdict));
+    assert!(reason.contains("already_converted"), "{reason}");
+    assert_unchanged(&before4, v4.root());
+
+    let tmp3 = TempDir::new().expect("tempdir3");
+    let (_s3, v3) = setup(&tmp3).await;
+    write(
+        v3.root(),
+        "index.md",
+        "# Index\n\n- [[p1]] — one.\n- [[p2]] — two.\n",
+    );
+    write_generated_pages(v3.root(), 5, 3);
+    let report = migrate::dry_run(&v3).await.expect("dry_run 3/5");
+    assert!(
+        report.verdict.reason().is_none(),
+        "3/5 generated must proceed, got {:?}",
+        report.verdict
+    );
+
+    // (c) git repo with a dirty worktree → refuse, even with --backup.
+    let tmpg = TempDir::new().expect("tempdirg");
+    let (sg, vg) = setup(&tmpg).await;
+    let rg = vg.root().to_path_buf();
+    build_fixture(&rg);
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&rg)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git");
+        assert!(status.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&status.stderr));
+    };
+    git(&["init", "-q"]);
+    git(&["-c", "user.email=t@t", "-c", "user.name=t", "add", "-A"]);
+    git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"]);
+    std::fs::write(rg.join("concepts/alpha.md"), "# dirty\n").unwrap();
+    let before_g = snapshot(&rg);
+    let backup = TempDir::new().expect("backup");
+    let report = migrate::apply(&vg, &sg, None).await.expect("apply dirty");
+    let reason = report
+        .verdict
+        .reason()
+        .unwrap_or_else(|| panic!("dirty worktree must refuse, got {:?}", report.verdict));
+    assert!(reason.contains("dirty_worktree"), "{reason}");
+    assert_unchanged(&before_g, &rg);
+    let report = migrate::apply(&vg, &sg, Some(backup.path()))
+        .await
+        .expect("apply dirty+backup");
+    assert!(
+        report
+            .verdict
+            .reason()
+            .is_some_and(|r| r.contains("dirty_worktree")),
+        "dirty git refuses even with backup (D-25): {:?}",
+        report.verdict
+    );
+    assert_unchanged(&before_g, &rg);
+
+    // (d) non-git vault: refuse without --backup; with --backup the archive
+    // exists (and contains the tree) and the conversion proceeds.
+    let tmpn = TempDir::new().expect("tempdirn");
+    let (sn, vn) = setup(&tmpn).await;
+    let rn = vn.root().to_path_buf();
+    build_fixture(&rn);
+    let before_n = snapshot(&rn);
+    let report = migrate::apply(&vn, &sn, None).await.expect("apply non-git");
+    let reason = report
+        .verdict
+        .reason()
+        .unwrap_or_else(|| panic!("non-git without backup must refuse, got {:?}", report.verdict));
+    assert!(reason.contains("no_backup"), "{reason}");
+    assert_unchanged(&before_n, &rn);
+
+    let backup = TempDir::new().expect("backup");
+    let report = migrate::apply(&vn, &sn, Some(backup.path()))
+        .await
+        .expect("apply with backup");
+    assert!(report.verdict.reason().is_none(), "{:?}", report.verdict);
+    let archives: Vec<_> = std::fs::read_dir(backup.path())
+        .expect("backup dir")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().unwrap_or_default().to_string_lossy().ends_with(".tar.gz"))
+        .collect();
+    assert_eq!(archives.len(), 1, "exactly one archive: {archives:?}");
+    let listing = std::process::Command::new("tar")
+        .args(["-tzf", &archives[0].to_string_lossy().to_string()])
+        .output()
+        .expect("tar");
+    let listing = String::from_utf8_lossy(&listing.stdout).to_string();
+    assert!(
+        listing.contains("concepts/alpha.md"),
+        "archive must contain the tree: {listing}"
+    );
+
+    // (e) --verify on the converted vault: Clean, 0 errors, zero writes;
+    // on a corrupted converted vault: errors listed, still zero writes.
+    let before_v = snapshot(&rn);
+    let report = migrate::verify(&vn).await.expect("verify clean");
+    assert_eq!(report.verdict, migrate::Verdict::Clean, "{:?}", report.verdict);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_unchanged(&before_v, &rn);
+
+    std::fs::write(rn.join("concepts/alpha.md"), "---\ntype: [unclosed\n---\n\nbody\n").unwrap();
+    let before_b = snapshot(&rn);
+    let report = migrate::verify(&vn).await.expect("verify broken");
+    assert!(!report.errors.is_empty(), "broken page must list errors");
+    assert!(
+        report.errors.iter().any(|e| e.contains("concepts/alpha.md")),
+        "{:?}",
+        report.errors
+    );
+    assert_ne!(report.verdict, migrate::Verdict::Clean);
+    assert_unchanged(&before_b, &rn);
+}
+
+/// (f) Pure undo-path decision matrix (git-absence is unit-testable here —
+/// the subprocess wrapper feeds these same inputs).
+#[test]
+fn undo_decision_matrix() {
+    // git binary absent → MissingBinary-style error, whatever else is true.
+    let err = migrate::decide_undo(false, false, false, false)
+        .expect_err("git-absent must error");
+    assert!(
+        matches!(&err, saussunet_core::error::CoreError::MissingBinary { binary, .. } if binary == "git"),
+        "{err}"
+    );
+    // git repo: dirty refuses (backup does not override), clean proceeds.
+    assert_eq!(
+        migrate::decide_undo(true, true, true, false).unwrap().as_deref(),
+        Some("dirty_worktree")
+    );
+    assert_eq!(
+        migrate::decide_undo(true, true, true, true).unwrap().as_deref(),
+        Some("dirty_worktree")
+    );
+    assert_eq!(migrate::decide_undo(true, true, false, false).unwrap(), None);
+    // non-git: backup required.
+    assert_eq!(
+        migrate::decide_undo(true, false, false, false).unwrap().as_deref(),
+        Some("no_backup")
+    );
+    assert_eq!(migrate::decide_undo(true, false, false, true).unwrap(), None);
+}
+
+/// Recursively copy `src` into `dst`, skipping `.git` directories.
+fn copy_tree(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap().flatten() {
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(&name);
+        if from.is_dir() {
+            copy_tree(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
+/// T13 (D-29): structural parity on a real B3Wiki checkout — convert a COPY
+/// and require 0 errors from the Rust checker plus the MoriNet
+/// `scan_conformance` version guess `Some("0.2")`. Citation notation is
+/// intentionally divergent (D-12), so this is structural parity only.
+#[tokio::test]
+#[ignore = "requires local /home/c/Projects/Dev/B3Wiki checkout"]
+async fn migrate_b3wiki_parity() {
+    let src = Path::new("/home/c/Projects/Dev/B3Wiki");
+    assert!(src.exists(), "B3Wiki checkout missing at {src:?}");
+    let tmp = TempDir::new().expect("tempdir");
+    let (store, vault) = setup(&tmp).await;
+    copy_tree(src, vault.root());
+
+    // The B3Wiki tree is already OKF-converted upstream — the refusal gate
+    // would (correctly) fire, so parity runs the conversion core directly.
+    let report = migrate::convert_tree(&vault, &store)
+        .await
+        .expect("convert_tree");
+    assert!(report.verdict.reason().is_none(), "{:?}", report.verdict);
+
+    let errors = okf::check_bundle(vault.root());
+    assert!(errors.is_empty(), "check_bundle on converted B3Wiki: {errors:?}");
+
+    // MoriNet scan_conformance rule replicated in-test (okf.rs:16,54-74):
+    // root index.md/log.md reserved; version guessed when typed pages are
+    // ≥80% of non-reserved and some page carries a v0.2 trust key.
+    const V02_KEYS: [&str; 5] = ["generated", "verified", "sources", "status", "stale_after"];
+    let (files, _skipped) = migrate::walk(vault.root()).expect("walk");
+    let mut total = 0usize;
+    let mut concepts = 0usize;
+    let mut v02 = false;
+    for (rel, path) in &files {
+        if rel == "index.md" || rel == "log.md" {
+            continue;
+        }
+        total += 1;
+        let Ok(md) = std::fs::read_to_string(path) else { continue };
+        let (yaml, _) = frontmatter::split(&md);
+        let Ok(fm) = serde_yml::from_str::<serde_yml::Value>(yaml) else {
+            continue;
+        };
+        let Some(m) = fm.as_mapping() else { continue };
+        let typed = m
+            .get("type")
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| !t.trim().is_empty());
+        if typed {
+            concepts += 1;
+            if V02_KEYS.iter().any(|k| m.get(*k).is_some()) {
+                v02 = true;
+            }
+        }
+    }
+    assert!(total > 0, "B3Wiki copy has no pages");
+    let version: Option<&str> = if total > 0 && concepts * 100 >= total * 80 {
+        Some(if v02 { "0.2" } else { "0.1" })
+    } else {
+        None
+    };
+    assert_eq!(
+        version,
+        Some("0.2"),
+        "MoriNet rule: concepts={concepts} total={total} v02={v02}"
+    );
+}
