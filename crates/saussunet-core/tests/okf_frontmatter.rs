@@ -545,3 +545,87 @@ fn okf_gate_rejects() {
         "W3->E",
     );
 }
+
+// ---------------------------------------------------------------------------
+// T5 extension (plan 04.1-03) — footnote ids keyed 1:1 to sources[].id (D-14).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sources_footnotes_keyed() {
+    let (_tmp, _id, store, vault) = setup().await;
+    let fm = raw::RawFrontmatter {
+        title: "Alpha".into(),
+        source_url: "https://a.example".into(),
+        ingested: "2026-10-30T12:00:00+00:00".into(),
+        sha256: "aa".into(),
+    };
+    raw::write_raw(&vault, None, "alpha", "md", &fm, b"a body")
+        .await
+        .unwrap();
+    raw::write_raw(
+        &vault,
+        None,
+        "beta",
+        "md",
+        &raw::RawFrontmatter {
+            title: "Beta".into(),
+            source_url: "https://b.example".into(),
+            ingested: "2026-10-30T13:00:00+00:00".into(),
+            sha256: "bb".into(),
+        },
+        b"b body",
+    )
+    .await
+    .unwrap();
+    let alpha = format!("raw/{}-alpha.md", today());
+    let beta = format!("raw/{}-beta.md", today());
+
+    // Case A — page WITH inline markers: footnote ids == sources ids 1:1.
+    let content = format!(
+        "---\ntitle: Keyed\ntype: concept\ncreated: {}\nupdated: {}\ntags: [technology]\nsources: [{}, {}]\n---\n\nClaim. ^[{}]\n",
+        today(),
+        today(),
+        alpha,
+        beta,
+        beta
+    );
+    let rebuilt = okf::rebuild_frontmatter(&vault, &store, "concepts/keyed.md", &content)
+        .await
+        .expect("rebuild ok");
+    let (yaml, body) = frontmatter::split(&rebuilt);
+    let fm = frontmatter::parse(yaml).unwrap();
+    let src_ids: Vec<String> = fm
+        .sources
+        .iter()
+        .map(|s| map_str(s, "id").expect("source id"))
+        .collect();
+    let mut def_ids: Vec<String> = Vec::new();
+    let mut rest = body;
+    while let Some(pos) = rest.find("[^") {
+        let after = &rest[pos + 2..];
+        let Some(end) = after.find(']') else { break };
+        let id = after[..end].to_string();
+        if !def_ids.contains(&id) {
+            def_ids.push(id);
+        }
+        rest = &after[end..];
+    }
+    assert_eq!(def_ids, src_ids, "footnote ids == sources ids 1:1");
+
+    // Case B — frontmatter provenance, NO inline markers (D-14): every source
+    // still listed, zero footnote definitions.
+    let content = format!(
+        "---\ntitle: Silent\ntype: concept\ncreated: {}\nupdated: {}\ntags: [technology]\nsources: [{}, {}]\n---\n\nNo markers here.\n",
+        today(),
+        today(),
+        alpha,
+        beta
+    );
+    let rebuilt = okf::rebuild_frontmatter(&vault, &store, "concepts/silent.md", &content)
+        .await
+        .expect("rebuild ok");
+    let (yaml, body) = frontmatter::split(&rebuilt);
+    let fm = frontmatter::parse(yaml).unwrap();
+    assert_eq!(fm.sources.len(), 2, "both sources still listed");
+    assert!(!body.contains("[^"), "zero footnote definitions: {body}");
+}

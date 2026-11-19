@@ -9,7 +9,7 @@
 //! `okf::rewrite_wikilinks`; the markdown-counter cases mirror
 //! `frontmatter::count_outbound_wikilinks` (okflint `MD_LINK` shape).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
@@ -320,4 +320,149 @@ async fn markdown_floor_rejects_generated_page() {
         !vault.root().join("concepts/lonely.md").exists(),
         "rejected page must not be written"
     );
+}
+
+// ---------------------------------------------------------------------------
+// T4 — footnote citations keyed to sources[].id (D-12/D-13/D-14).
+// ---------------------------------------------------------------------------
+
+/// Field of a sources[] mapping as a string.
+fn map_str(v: &serde_yml::Value, k: &str) -> Option<String> {
+    match v {
+        serde_yml::Value::Mapping(m) => m.get(k).and_then(|x| x.as_str()).map(String::from),
+        _ => None,
+    }
+}
+
+#[test]
+fn footnote_citations_unit() {
+    // B3Wiki TestCitations adapted to footnote form (D-29): dedup walk,
+    // first-appearance order, definitions keyed to sources[].id.
+    let paths: Vec<String> = vec![
+        "raw/2026-10-30-foo.md".into(),
+        "raw/2026-11-01-bar.md".into(),
+    ];
+    let mut meta = BTreeMap::new();
+    meta.insert(
+        paths[0].clone(),
+        okf::RawSourceMeta {
+            title: "Foo Doc".into(),
+            last_modified: None,
+        },
+    );
+    meta.insert(
+        paths[1].clone(),
+        okf::RawSourceMeta {
+            title: "Bar Doc".into(),
+            last_modified: None,
+        },
+    );
+    let sources = okf::sources_entries(&paths, &meta);
+    let body = "A.^[raw/2026-10-30-foo.md] B.^[raw/2026-11-01-bar.md] C.^[raw/2026-10-30-foo.md]";
+    let (body2, defs) = okf::rewrite_citations(body, &sources);
+    // Markers replaced in place; all occurrences of one target share one id.
+    assert_eq!(body2, "A.[^2026-10-30-foo] B.[^2026-11-01-bar] C.[^2026-10-30-foo]");
+    // Definitions in first-appearance order, keyed to sources[].id.
+    assert_eq!(defs, "[^2026-10-30-foo]: Foo Doc\n[^2026-11-01-bar]: Bar Doc");
+    assert!(!body2.contains("^["), "no bare ^[ remains");
+    assert!(!defs.contains("# Citations"), "v0.1 form never emitted (D-12)");
+}
+
+#[tokio::test]
+async fn footnote_citations() {
+    // Rebuild-path end-to-end: markers → keyed footnotes + trailing block.
+    let (_tmp, _id, store, vault) = setup().await;
+    let fm = raw::RawFrontmatter {
+        title: "Alpha".into(),
+        source_url: "https://a.example".into(),
+        ingested: "2026-10-30T12:00:00+00:00".into(),
+        sha256: "aa".into(),
+    };
+    raw::write_raw(&vault, None, "alpha", "md", &fm, b"a body")
+        .await
+        .unwrap();
+    raw::write_raw(
+        &vault,
+        None,
+        "beta",
+        "md",
+        &raw::RawFrontmatter {
+            title: "Beta".into(),
+            source_url: "https://b.example".into(),
+            ingested: "2026-10-30T13:00:00+00:00".into(),
+            sha256: "bb".into(),
+        },
+        b"b body",
+    )
+    .await
+    .unwrap();
+    let alpha = format!("raw/{}-alpha.md", today());
+    let beta = format!("raw/{}-beta.md", today());
+    let alpha_id = format!("{}-alpha", today());
+    let beta_id = format!("{}-beta", today());
+    let content = format!(
+        "---\ntitle: Cited\ntype: concept\ncreated: {d}\nupdated: {d}\ntags: [technology]\nsources: [{a}, {b}]\n---\n\nClaim one. ^[{a}]\n\nClaim two. ^[{b}]\n\nClaim three. ^[{a}]\n\nSee [[Meta]] and [[JavaScript]].\n",
+        d = today(),
+        a = alpha,
+        b = beta
+    );
+    let rebuilt = okf::rebuild_frontmatter(&vault, &store, "concepts/cited.md", &content)
+        .await
+        .expect("rebuild ok");
+    let (yaml, body) = frontmatter::split(&rebuilt);
+    let fm = frontmatter::parse(yaml).unwrap();
+
+    // No raw markers, no v0.1 `# Citations` heading anywhere.
+    assert!(!rebuilt.contains("^["), "no bare ^[ on disk: {rebuilt}");
+    assert!(!rebuilt.contains("# Citations"), "v0.1 form never emitted");
+    // Markers replaced, deduped (alpha cited twice → one id, two markers).
+    assert_eq!(body.matches(&format!("[^{alpha_id}]")).count(), 3); // 2 refs + 1 def
+    assert_eq!(body.matches(&format!("[^{beta_id}]")).count(), 2); // 1 ref + 1 def
+    // Definition block at the very end, separated by a blank line.
+    assert!(
+        body.contains(&format!("\n\n[^{alpha_id}]: Alpha\n[^{beta_id}]: Beta\n")),
+        "definitions at end after blank line: {body}"
+    );
+    // Footnote ids == sources[].id values, 1:1 (D-12/D-14 keyed).
+    let src_ids: Vec<String> = fm
+        .sources
+        .iter()
+        .map(|s| map_str(s, "id").expect("source id"))
+        .collect();
+    assert_eq!(src_ids, vec![alpha_id.clone(), beta_id.clone()]);
+}
+
+#[tokio::test]
+async fn footnotes_on_disk_after_ingest() {
+    // Full pipeline: the written page carries keyed footnotes, zero raw markers.
+    let (_tmp, _id, store, vault) = setup().await;
+    let url = "https://okf.example/footnotes";
+    serve(url, V1);
+    let provider = Arc::new(MockProvider::new(vec![
+        Scripted::Ok(pass1_central("React", "concept")),
+        Scripted::Ok(page_json("React", "concept")),
+    ]));
+    run_ingest(&store, &vault, &provider_arc(&provider), url, url).await;
+
+    let content =
+        std::fs::read_to_string(vault.root().join("concepts/react.md")).expect("page on disk");
+    let (yaml, body) = frontmatter::split(&content);
+    let fm = frontmatter::parse(yaml).unwrap();
+    assert!(!content.contains("^["), "no bare ^[ on disk: {content}");
+    assert!(!content.contains("# Citations"));
+    let id = format!("{}-threshold-post", today());
+    assert!(
+        body.contains(&format!("[^{id}]")),
+        "keyed footnote marker present: {body}"
+    );
+    assert!(
+        body.trim_end().ends_with(&format!("[^{id}]: Threshold Post")),
+        "definition block at end: {body}"
+    );
+    let src_ids: Vec<String> = fm
+        .sources
+        .iter()
+        .map(|s| map_str(s, "id").expect("source id"))
+        .collect();
+    assert_eq!(src_ids, vec![id]);
 }
