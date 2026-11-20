@@ -668,14 +668,40 @@ fn copy_tree(src: &Path, dst: &Path) {
 /// and require 0 errors from the Rust checker plus the MoriNet
 /// `scan_conformance` version guess `Some("0.2")`. Citation notation is
 /// intentionally divergent (D-12), so this is structural parity only.
+///
+/// The fixture is exported from the pinned reference branch `okf` (OKF v0.2,
+/// established at e9abfdd) via `git archive` — NOT the live working tree, so
+/// checkout drift (e.g. a newer `okf-0.3` branch with extra root-index keys)
+/// cannot break parity. The user's checkout is never modified.
 #[tokio::test]
-#[ignore = "requires local /home/c/Projects/Dev/B3Wiki checkout"]
+#[ignore = "requires local /home/c/Projects/Dev/B3Wiki checkout with branch okf"]
 async fn migrate_b3wiki_parity() {
     let src = Path::new("/home/c/Projects/Dev/B3Wiki");
     assert!(src.exists(), "B3Wiki checkout missing at {src:?}");
     let tmp = TempDir::new().expect("tempdir");
     let (store, vault) = setup(&tmp).await;
-    copy_tree(src, vault.root());
+    // Export the pinned reference branch into a staging dir (git archive never
+    // touches the working tree or index of the source repo).
+    let staged = TempDir::new().expect("staging tempdir");
+    let mut archiver = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(src)
+        .args(["archive", "--format=tar", "okf"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn git archive");
+    let tar_status = std::process::Command::new("tar")
+        .args(["-x", "-f", "-", "-C"])
+        .arg(staged.path())
+        .stdin(std::process::Stdio::from(archiver.stdout.take().unwrap()))
+        .status()
+        .expect("spawn tar");
+    let archive_status = archiver.wait().expect("wait git archive");
+    assert!(
+        archive_status.success() && tar_status.success(),
+        "git archive okf | tar -x failed: git={archive_status:?} tar={tar_status:?}"
+    );
+    copy_tree(staged.path(), vault.root());
 
     // The B3Wiki tree is already OKF-converted upstream — the refusal gate
     // would (correctly) fire, so parity runs the conversion core directly.
